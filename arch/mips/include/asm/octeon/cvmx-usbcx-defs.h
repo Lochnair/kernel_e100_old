@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-usbcx-defs.h
+../../../../../executive/cvmx-usbcx-defs.h

@@ -1,1 +1,1 @@
-../../../../../../../executive/octeon-model.c
+../../../../executive/octeon-model.c

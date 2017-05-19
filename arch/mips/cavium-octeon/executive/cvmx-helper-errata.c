@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-helper-errata.c
+../../../../executive/cvmx-helper-errata.c

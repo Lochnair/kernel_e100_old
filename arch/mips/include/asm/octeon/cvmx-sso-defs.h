@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-sso-defs.h
+../../../../../executive/cvmx-sso-defs.h

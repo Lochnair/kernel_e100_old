@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-sysinfo.c
+../../../../executive/cvmx-sysinfo.c

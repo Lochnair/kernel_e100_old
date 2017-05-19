@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-helper-cfg.c
+../../../../executive/cvmx-helper-cfg.c

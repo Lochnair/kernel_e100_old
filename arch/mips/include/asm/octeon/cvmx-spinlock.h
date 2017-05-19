@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-spinlock.h
+../../../../../executive/cvmx-spinlock.h

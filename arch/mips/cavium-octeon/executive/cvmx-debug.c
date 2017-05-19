@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-debug.c
+../../../../executive/cvmx-debug.c

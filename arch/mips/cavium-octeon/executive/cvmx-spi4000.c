@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-spi4000.c
+../../../../executive/cvmx-spi4000.c

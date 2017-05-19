@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-npei-defs.h
+../../../../../executive/cvmx-npei-defs.h

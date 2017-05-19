@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-global-resources.h
+../../../../../executive/cvmx-global-resources.h

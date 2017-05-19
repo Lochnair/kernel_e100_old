@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-pko3-resources.c
+../../../../executive/cvmx-pko3-resources.c

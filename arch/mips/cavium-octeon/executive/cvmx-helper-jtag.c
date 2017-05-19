@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-helper-jtag.c
+../../../../executive/cvmx-helper-jtag.c

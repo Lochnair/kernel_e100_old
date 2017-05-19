@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-npi-defs.h
+../../../../../executive/cvmx-npi-defs.h

@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-pki-resources.h
+../../../../../executive/cvmx-pki-resources.h

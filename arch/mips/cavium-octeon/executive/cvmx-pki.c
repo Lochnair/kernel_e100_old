@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-pki.c
+../../../../executive/cvmx-pki.c

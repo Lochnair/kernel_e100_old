@@ -1,1 +1,1 @@
-../../../../../../../../executive/cvmx-clock.h
+../../../../../executive/cvmx-clock.h

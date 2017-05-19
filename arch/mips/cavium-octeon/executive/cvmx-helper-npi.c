@@ -1,1 +1,1 @@
-../../../../../../../executive/cvmx-helper-npi.c
+../../../../executive/cvmx-helper-npi.c
