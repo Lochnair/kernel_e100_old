@@ -2619,7 +2619,12 @@ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 					goto out_kfree_skb;
 			}
 		}
-
+#ifdef CONFIG_SHORTCUT_FE
+	/* If this skb has been fast forwarded then we don't want it to
+	 * go to any taps (by definition we're trying to bypass them).
+	 */
+	if (!skb->fast_forwarded) {
+#endif
 #if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
 		if (!list_empty(&ptype_all) &&
 					!(skb->imq_flags & IMQ_F_ENQUEUE))
@@ -2627,7 +2632,9 @@ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 		if (!list_empty(&ptype_all))
 #endif
 			dev_queue_xmit_nit(skb, dev);
-
+#ifdef CONFIG_SHORTCUT_FE
+	}
+#endif
 		skb_len = skb->len;
 		rc = ops->ndo_start_xmit(skb, dev);
 		trace_net_dev_xmit(skb, rc, dev, skb_len);
@@ -3503,6 +3510,11 @@ void netdev_rx_handler_unregister(struct net_device *dev)
 }
 EXPORT_SYMBOL_GPL(netdev_rx_handler_unregister);
 
+#ifdef CONFIG_SHORTCUT_FE
+int (*fast_nat_recv)(struct sk_buff *skb) __rcu __read_mostly;
+EXPORT_SYMBOL_GPL(fast_nat_recv);
+#endif
+
 /*
  * Limit the use of PFMEMALLOC reserves to those protocols that implement
  * the special handling of PFMEMALLOC skbs.
@@ -3530,6 +3542,9 @@ static int __netif_receive_skb_core(struct sk_buff *skb, bool pfmemalloc)
 	bool deliver_exact = false;
 	int ret = NET_RX_DROP;
 	__be16 type;
+#ifdef CONFIG_SHORTCUT_FE
+	int (*fast_recv)(struct sk_buff *skb);
+#endif
 
 #ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
        if (cvm_br_rx_hook)
@@ -3571,6 +3586,16 @@ another_round:
 		if (unlikely(!skb))
 			goto out;
 	}
+
+#ifdef CONFIG_SHORTCUT_FE
+	fast_recv = rcu_dereference(fast_nat_recv);
+	if (fast_recv) {
+		if (fast_recv(skb)) {
+			ret = NET_RX_SUCCESS;
+			goto out;
+		}
+	}
+#endif
 
 #ifdef CONFIG_NET_CLS_ACT
 	if (skb->tc_verd & TC_NCLS) {
