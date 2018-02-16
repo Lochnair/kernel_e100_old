@@ -1,6 +1,7 @@
 #include "kvm/kvm.h"
 #include "kvm/term.h"
 #include "kvm/util.h"
+#include "kvm/8250-serial.h"
 #include "kvm/virtio-console.h"
 
 #include "arm-common/gic.h"
@@ -45,10 +46,12 @@ void kvm__arch_delete_ram(struct kvm *kvm)
 	munmap(kvm->arch.ram_alloc_start, kvm->arch.ram_alloc_size);
 }
 
-void kvm__arch_periodic_poll(struct kvm *kvm)
+void kvm__arch_read_term(struct kvm *kvm)
 {
-	if (term_readable(0))
+	if (term_readable(0)) {
+		serial8250__update_consoles(kvm);
 		virtio_console__inject_interrupt(kvm);
+	}
 }
 
 void kvm__arch_set_cmdline(char *cmdline, bool video)
@@ -58,11 +61,13 @@ void kvm__arch_set_cmdline(char *cmdline, bool video)
 void kvm__arch_init(struct kvm *kvm, const char *hugetlbfs_path, u64 ram_size)
 {
 	/*
-	 * Allocate guest memory. We must align out buffer to 64K to
+	 * Allocate guest memory. We must align our buffer to 64K to
 	 * correlate with the maximum guest page size for virtio-mmio.
+	 * If using THP, then our minimal alignment becomes 2M.
+	 * 2M trumps 64K, so let's go with that.
 	 */
 	kvm->ram_size = min(ram_size, (u64)ARM_MAX_MEMORY(kvm));
-	kvm->arch.ram_alloc_size = kvm->ram_size + SZ_64K;
+	kvm->arch.ram_alloc_size = kvm->ram_size + SZ_2M;
 	kvm->arch.ram_alloc_start = mmap_anon_or_hugetlbfs(kvm, hugetlbfs_path,
 						kvm->arch.ram_alloc_size);
 
@@ -71,10 +76,10 @@ void kvm__arch_init(struct kvm *kvm, const char *hugetlbfs_path, u64 ram_size)
 		    kvm->arch.ram_alloc_size, errno);
 
 	kvm->ram_start = (void *)ALIGN((unsigned long)kvm->arch.ram_alloc_start,
-					SZ_64K);
+					SZ_2M);
 
 	madvise(kvm->arch.ram_alloc_start, kvm->arch.ram_alloc_size,
-		MADV_MERGEABLE);
+		MADV_MERGEABLE | MADV_HUGEPAGE);
 
 	/* Initialise the virtual GIC. */
 	if (gic__init_irqchip(kvm))

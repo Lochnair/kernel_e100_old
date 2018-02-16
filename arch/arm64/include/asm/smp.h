@@ -65,38 +65,9 @@ extern void secondary_entry(void);
 extern void arch_send_call_function_single_ipi(int cpu);
 extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
 
-struct device_node;
-
 extern int __cpu_disable(void);
 
 extern void __cpu_die(unsigned int cpu);
 extern void cpu_die(void);
-
-struct smp_operations {
-	const char	*name;
-	/*
-	 * Check devicetree data for cpu
-	 */
- 	int		(*cpu_init)(struct device_node *, unsigned int);
-	/*
-	 * Test if cpu is present and bootable
-	 */
- 	int		(*cpu_prepare)(unsigned int);
-	/*
-	 * Boot cpu into the kernel
-	 */
-	int		(*cpu_boot)(unsigned int);
-	/*
-	 * Performs post-boot cleanup
-	 */
-	void		(*cpu_postboot)(void);
-#ifdef CONFIG_HOTPLUG_CPU
-	int  (*cpu_disable)(unsigned int cpu);
-	void (*cpu_die)(unsigned int cpu);
-#endif
-};
-
-extern const struct smp_operations smp_spin_table_ops;
-extern const struct smp_operations smp_psci_ops;
 
 #endif /* ifndef __ASM_SMP_H */

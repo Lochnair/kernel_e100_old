@@ -6,12 +6,11 @@
 #include <sys/ioctl.h>
 #include <stdlib.h>
 
-#define CPUID_FUNC_PERFMON		0x0A
-
 #define	MAX_KVM_CPUID_ENTRIES		100
 
 static void filter_cpuid(struct kvm_cpuid2 *kvm_cpuid)
 {
+	unsigned int signature[3];
 	unsigned int i;
 
 	/*
@@ -21,6 +20,13 @@ static void filter_cpuid(struct kvm_cpuid2 *kvm_cpuid)
 		struct kvm_cpuid_entry2 *entry = &kvm_cpuid->entries[i];
 
 		switch (entry->function) {
+		case 0:
+			/* Vendor name */
+			memcpy(signature, "LKVMLKVMLKVM", 12);
+			entry->ebx = signature[0];
+			entry->ecx = signature[1];
+			entry->edx = signature[2];
+			break;
 		case 1:
 			/* Set X86_FEATURE_HYPERVISOR */
 			if (entry->index == 0)
@@ -30,9 +36,32 @@ static void filter_cpuid(struct kvm_cpuid2 *kvm_cpuid)
 			/* Clear X86_FEATURE_EPB */
 			entry->ecx = entry->ecx & ~(1 << 3);
 			break;
-		case CPUID_FUNC_PERFMON:
-			entry->eax = 0x00; /* disable it */
+		case 10: { /* Architectural Performance Monitoring */
+			union cpuid10_eax {
+				struct {
+					unsigned int version_id		:8;
+					unsigned int num_counters	:8;
+					unsigned int bit_width		:8;
+					unsigned int mask_length	:8;
+				} split;
+				unsigned int full;
+			} eax;
+
+			/*
+			 * If the host has perf system running,
+			 * but no architectural events available
+			 * through kvm pmu -- disable perf support,
+			 * thus guest won't even try to access msr
+			 * registers.
+			 */
+			if (entry->eax) {
+				eax.full = entry->eax;
+				if (eax.split.version_id != 2 ||
+				    !eax.split.num_counters)
+					entry->eax = 0;
+			}
 			break;
+		}
 		default:
 			/* Keep the CPUID function as -is */
 			break;

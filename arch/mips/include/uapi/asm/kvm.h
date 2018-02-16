@@ -132,4 +132,6 @@ struct kvm_mips_interrupt {
 	__u32 irq;
 };
 
+#define KVM_NR_IRQCHIPS    1
+
 #endif /* __LINUX_KVM_MIPS_H */

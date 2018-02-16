@@ -29,6 +29,7 @@
 #include <asm/unistd.h>
 #include <asm/unistd32.h>
 #include <asm/ftrace.h>
+#include <asm/pgtable.h>
 
 /*
  * Bad Abort numbers
@@ -44,6 +45,11 @@
 	.if	\regsize == 32
 	mov	w0, w0				// zero upper 32 bits of x0
 	.endif
+#ifdef CONFIG_THUNDERX_PASS1_ERRATA_22558
+	str	q0, [sp, #-16]!
+	tbl     v0.8b, {v1.16b}, v0.8b
+	ldr	q0, [sp], #16
+#endif
 	push	x28, x29
 	push	x26, x27
 	push	x24, x25
@@ -75,7 +81,6 @@
 	.if	\el == 0
 	mvn	x21, xzr
 	str	x21, [sp, #S_SYSCALLNO]
-
 	.endif
 
 #ifdef CONFIG_MICROSTATE_ACCT
@@ -101,6 +106,11 @@
 	.if	\el == 0
 	ldr	x23, [sp, #S_SP]		// load return stack pointer
 	.endif
+#ifdef CONFIG_THUNDERX_PASS1_ERRATA_22558
+	str	q0, [sp, #-16]!
+	tbl     v0.16b, {v1.16b}, v0.16b
+	ldr	q0, [sp], #16
+#endif
 	.if	\ret
 	ldr	x1, [sp, #S_X1]			// preserve x0 (syscall return)
 	add	sp, sp, S_X2
@@ -111,7 +121,7 @@
 	pop	x4, x5
 	pop	x6, x7
 	pop	x8, x9
-	msr     elr_el1, x21			// set up the return data
+	msr	elr_el1, x21			// set up the return data
 	msr	spsr_el1, x22
 	.if	\el == 0
 	msr	sp_el0, x23
@@ -286,7 +296,6 @@ el1_sp_pc:
 	 * Stack or PC alignment exception handling
 	 */
 	mrs	x0, far_el1
-	mov	x1, x25
 	mov	x2, sp
 	b	do_sp_pc_abort
 el1_undef:
@@ -299,12 +308,10 @@ el1_dbg:
 	/*
 	 * Debug exception handling
 	 */
-	mrs	x25, far_el1			//far for watchpt
-	cmp	x24, #ESR_EL1_EC_WATCHPT_EL1
-	csel	x0, x25, x22, eq	//addr: x25->far_el1, x22->elr_el1
-	b.ge	do_dbg
+	cmp	x24, #ESR_EL1_EC_BRK64		// if BRK64
+	cinc	x24, x24, eq			// set bit '0'
 	tbz	x24, #0, el1_inv		// EL1 only
-do_dbg:
+	mrs	x0, far_el1
 	mov	x2, sp				// struct pt_regs
 	bl	do_debug_exception
 
@@ -320,6 +327,9 @@ ENDPROC(el1_sync)
 	.align	6
 el1_irq:
 	kernel_entry 1
+#ifdef CONFIG_PAX_KERNEXEC
+	bl pax_enter_irq
+#endif
 	enable_dbg_if_not_stepping x0
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_off
@@ -344,6 +354,9 @@ el1_irq:
 #endif
 #ifdef CONFIG_TRACE_IRQFLAGS
 	bl	trace_hardirqs_on
+#endif
+#ifdef CONFIG_PAX_KERNEXEC
+	bl pax_exit_irq
 #endif
 	kernel_exit 1
 ENDPROC(el1_irq)
@@ -510,7 +523,7 @@ el0_inv:
 	mov	x0, sp
 	mov	x1, #BAD_SYNC
 	mrs	x2, esr_el1
-	b	bad_mode
+	b	bad_el0_sync
 ENDPROC(el0_sync)
 
 	.align	6
@@ -658,7 +671,7 @@ el0_svc:
 #ifdef CONFIG_ARM64_ILP32
 	get_thread_info tsk
 	ldr	x16, [tsk, #TI_FLAGS]
-	tbnz	x16, #TIF_32BIT_AARCH64, el0_ilp32_svc // We are using ILP32
+	tbnz	x16, #TIF_32BIT, el0_ilp32_svc	// We are using ILP32
 #endif
 	adrp	stbl, sys_call_table		// load syscall table pointer
 el0_svc_naked:					// compat entry point
@@ -683,10 +696,9 @@ ENDPROC(el0_svc)
 
 #ifdef CONFIG_ARM64_ILP32
 el0_ilp32_svc:
-	adrp	stbl, sys_ilp32_call_table	// load syscall table pointer
+	adrp	stbl, sys_call_ilp32_table // load syscall table pointer
 	b el0_svc_naked
 #endif
-	
 
 	/*
 	 * This is the really slow path.  We're going to be doing context
@@ -722,13 +734,6 @@ ENTRY(sys_rt_sigreturn_wrapper)
 	mov	x0, sp
 	b	sys_rt_sigreturn
 ENDPROC(sys_rt_sigreturn_wrapper)
-
-#ifdef CONFIG_ARM64_ILP32
-ENTRY(sys_ilp32_rt_sigreturn_wrapper)
-	mov	x0, sp
-	b	sys_ilp32_rt_sigreturn
-ENDPROC(sys_ilp32_rt_sigreturn_wrapper)
-#endif
 
 ENTRY(handle_arch_irq)
 	.quad	0

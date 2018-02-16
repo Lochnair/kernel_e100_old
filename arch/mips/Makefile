@@ -253,10 +253,22 @@ ifdef CONFIG_64BIT
   endif
 endif
 
-KBUILD_AFLAGS	+= $(cflags-y)
+
+# do binutils support CFI?
+cfireg := $$$$0
+cfi := $(call as-instr,.cfi_startproc\n.cfi_rel_offset $(cfireg)$(comma)0\n.cfi_endproc,-DCONFIG_AS_CFI=1)
+# is .cfi_signal_frame supported too?
+cfi-sigframe := $(call as-instr,.cfi_startproc\n.cfi_signal_frame\n.cfi_endproc,-DCONFIG_AS_CFI_SIGNAL_FRAME=1)
+cfi-sections := $(call as-instr,.cfi_sections .debug_frame,-DCONFIG_AS_CFI_SECTIONS=1)
+
+KBUILD_AFLAGS	+= $(cfi) $(cfi-sigframe) $(cfi-sections) $(cflags-y)
 KBUILD_CFLAGS	+= $(cflags-y)
 KBUILD_CPPFLAGS += -DVMLINUX_LOAD_ADDRESS=$(load-y)
 KBUILD_CPPFLAGS += -DDATAOFFSET=$(if $(dataoffset-y),$(dataoffset-y),0)
+
+# This is required to get dwarf unwinding tables into .debug_frame
+# instead of .eh_frame so we don't discard them.
+KBUILD_CFLAGS += -fno-asynchronous-unwind-tables
 
 LDFLAGS			+= -m $(ld-emul)
 

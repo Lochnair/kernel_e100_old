@@ -254,7 +254,7 @@ struct ipmi_serial_info {
 	 * call.  Generally used after a panic to make sure stuff goes
 	 * out.
 	 */
-	int run_to_completion;
+	bool run_to_completion;
 
 	/*
 	 * The driver is shutting down, don't start anything new.
@@ -1269,7 +1269,7 @@ static void ipmi_serial_request_events(void *send_info)
 	start_next_msg(info, flags);
 }
 
-static void ipmi_serial_set_run_to_completion(void *send_info, int rtc_on)
+static void ipmi_serial_set_run_to_completion(void *send_info, bool rtc_on)
 {
 	struct ipmi_serial_info *info = send_info;
 	struct uart_port *port;
@@ -1733,7 +1733,6 @@ static int ipmi_serial_found(struct ipmi_serial_info *info)
 	int                     timeout;
 	int                     retries;
 	unsigned int            capabilities;
-	char		        sysfs_name[sizeof(info->name) + 4];
 
 	printk(KERN_INFO PFX "Found a matching serial port\n",
 	       info->name, info->line);
@@ -1824,14 +1823,10 @@ static int ipmi_serial_found(struct ipmi_serial_info *info)
 	}
 
 
-	snprintf(sysfs_name, sizeof(sysfs_name), "bmc:%s%d", info->name,
-		 info->line);
-
 	rv = ipmi_register_smi(&handlers,
 			       info,
 			       &info->device_id,
 			       info->port->dev,
-			       sysfs_name,
 			       info->slave_addr);
 	if (rv) {
 		printk(KERN_ERR PFX "Unable to register the "
@@ -1915,36 +1910,29 @@ static void setup_intf(struct ipmi_serial_info *info,
 		return;
 	}
 	info->port->state->direct = &info->direct;
-	if (!info->port->state->xmit.buf) {
-		info->port->state->xmit.buf = info->uart_buffer;
-		uart_circ_clear(&info->port->state->xmit);
-		info->port->state->usflags |= UART_STATE_BOOT_ALLOCATED;
-	}
+	info->port->state->xmit.buf = info->uart_buffer;
+	uart_circ_clear(&info->port->state->xmit);
+	info->port->state->usflags |= UART_STATE_BOOT_ALLOCATED;
 
 	rv = info->port->ops->startup(info->port);
 	if (rv) {
-		if (info->port->state->xmit.buf == info->uart_buffer) {
-			info->port->state->xmit.buf = NULL;
-			info->port->state->usflags &=
-					~UART_STATE_BOOT_ALLOCATED;
-		}
-		uart_put_direct_port(info->port);
-		info->port = NULL;
 		printk(KERN_ERR PFX "Unable setup serial port %d\n",
 		       info->name, info->line, rv);
-		return;
+		goto err_out;
 	}
 
-	if (ipmi_serial_found(info)) {
-		if (info->port->state->xmit.buf == info->uart_buffer) {
-			info->port->state->xmit.buf = NULL;
-			info->port->state->usflags &=
-					~UART_STATE_BOOT_ALLOCATED;
-		}
-		info->port->ops->shutdown(info->port);
-		uart_put_direct_port(info->port);
-		info->port = NULL;
-	}
+	if (ipmi_serial_found(info))
+		goto err_shutdown;
+
+	return;
+
+err_shutdown:
+	info->port->ops->shutdown(info->port);
+err_out:
+	info->port->state->xmit.buf = NULL;
+	info->port->state->usflags &= ~UART_STATE_BOOT_ALLOCATED;
+	uart_put_direct_port(info->port);
+	info->port = NULL;
 }
 
 static void free_info_memory(struct ipmi_serial_info *info)

@@ -26,6 +26,8 @@
 
 #define check_pgt_cache()		do { } while (0)
 
+#ifndef CONFIG_ARM64_64K_PAGES
+
 static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
 	return (pmd_t *)get_zeroed_page(GFP_KERNEL | __GFP_REPEAT);
@@ -47,30 +49,6 @@ static inline void pud_populate_kernel(struct mm_struct *mm, pud_t *pud, pmd_t *
 	pud_populate(mm, pud, pmd);
 }
 
-#ifndef CONFIG_ARM64_64K_PAGES
-
-static inline pud_t *pud_alloc_one(struct mm_struct *mm, unsigned long addr)
-{
-	return (pud_t *)get_zeroed_page(GFP_KERNEL | __GFP_REPEAT);
-}
-
-static inline void pud_free(struct mm_struct *mm, pmd_t *pud)
-{
-	BUG_ON((unsigned long)pud & (PAGE_SIZE-1));
-	free_page((unsigned long)pud);
-}
-
-
-static inline void pgd_populate(struct mm_struct *mm, pgd_t *pgd, pmd_t *pud)
-{
-	set_pgd(pgd, __pgd(__pa(pud) | PMD_TYPE_TABLE));
-}
-
-static inline void pgd_populate_kernel(struct mm_struct *mm,
-				       pgd_t *pgd, pud_t *pud)
-{
-	pgd_populate(mm, pgd, pud);
-}
 #endif	/* CONFIG_ARM64_64K_PAGES */
 
 extern pgd_t *pgd_alloc(struct mm_struct *mm);

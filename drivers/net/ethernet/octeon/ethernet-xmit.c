@@ -55,7 +55,7 @@ CVM_OCT_XMIT
 	int qos;
 	int i;
 	int frag_count;
-	enum {QUEUE_HW, QUEUE_WQE, QUEUE_DROP} queue_type;
+	enum {QUEUE_HW, QUEUE_WQE, QUEUE_DROP, QUEUE_DROP_NO_DEC} queue_type;
 	struct octeon_ethernet *priv = netdev_priv(dev);
 	s32 queue_depth;
 	s32 buffers_to_free;
@@ -79,11 +79,32 @@ CVM_OCT_XMIT
 		/* Fetch and increment the number of packets to be
 		 * freed.
 		 */
-		cvmx_fau_async_fetch_and_add32(CVMX_SCR_SCRATCH + 8,
+		cvmx_hwfau_async_fetch_and_add32(CVMX_SCR_SCRATCH + 8,
 					       FAU_NUM_PACKET_BUFFERS_TO_FREE,
 					       0);
 	}
 
+	frag_count = 0;
+	if (skb_has_frag_list(skb))
+		skb_walk_frags(skb, skb_tmp)
+			frag_count++;
+	/* We have space for 12 segment pointers, If there will be
+	 * more than that, we must linearize.  The count is: 1 (base
+	 * SKB) + frag_count + nr_frags.
+	 */
+	if (unlikely(skb_shinfo(skb)->nr_frags + frag_count > 11)) {
+		if (unlikely(__skb_linearize(skb))) {
+			dev_kfree_skb_any(skb);
+			dev->stats.tx_dropped++;
+			goto post_preempt_out;
+		}
+		frag_count = 0;
+	}
+
+	/* We cannot move to a different CPU once we determine our
+	 * queue number/qos
+	 */
+	preempt_disable();
 #ifdef CVM_OCT_LOCKLESS
 	qos = cvmx_get_core_num();
 #else
@@ -101,24 +122,8 @@ CVM_OCT_XMIT
 		qos = 0;
 #endif
 	if (USE_ASYNC_IOBDMA) {
-		cvmx_fau_async_fetch_and_add32(CVMX_SCR_SCRATCH,
+		cvmx_hwfau_async_fetch_and_add32(CVMX_SCR_SCRATCH,
 					       priv->tx_queue[qos].fau, 1);
-	}
-
-	frag_count = 0;
-	if (skb_has_frag_list(skb))
-		skb_walk_frags(skb, skb_tmp)
-			frag_count++;
-	/* We have space for 12 segment pointers, If there will be
-	 * more than that, we must linearize.  The count is: 1 (base
-	 * SKB) + frag_count + nr_frags.
-	 */
-	if (unlikely(skb_shinfo(skb)->nr_frags + frag_count > 11)) {
-		if (unlikely(__skb_linearize(skb))) {
-			queue_type = QUEUE_DROP;
-			goto skip_xmit;
-		}
-		frag_count = 0;
 	}
 
 #ifndef CVM_OCT_LOCKLESS
@@ -173,10 +178,10 @@ CVM_OCT_XMIT
 	} else {
 		u64 *hw_buffer_list;
 
-		work = cvmx_fpa_alloc(wqe_pool);
+		work = cvmx_fpa1_alloc(wqe_pool);
 		if (unlikely(!work)) {
 			netdev_err(dev, "Failed WQE allocate\n");
-			queue_type = QUEUE_DROP;
+			queue_type = USE_ASYNC_IOBDMA ? QUEUE_DROP : QUEUE_DROP_NO_DEC;
 			goto skip_xmit;
 		}
 		hw_buffer_list = (u64 *)work->packet_data;
@@ -243,10 +248,8 @@ CVM_OCT_XMIT
 		pko_command.s.dontfree = 0;
 
 	/* Check if we can use the hardware checksumming */
-	if (USE_HW_TCPUDP_CHECKSUM && (skb->protocol == htons(ETH_P_IP)) &&
-	    (ip_hdr(skb)->version == 4) && (ip_hdr(skb)->ihl == 5) &&
-	    ((ip_hdr(skb)->frag_off == 0) || (ip_hdr(skb)->frag_off == htons(1 << 14)))
-	    && ((ip_hdr(skb)->protocol == IPPROTO_TCP) || (ip_hdr(skb)->protocol == IPPROTO_UDP))) {
+	if (USE_HW_TCPUDP_CHECKSUM && skb->ip_summed != CHECKSUM_NONE &&
+	    skb->ip_summed != CHECKSUM_UNNECESSARY) {
 		/* Use hardware checksum calc */
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1;
 		if (unlikely(priv->imode == CVMX_HELPER_INTERFACE_MODE_SRIO))
@@ -260,8 +263,8 @@ CVM_OCT_XMIT
 		buffers_to_free = cvmx_scratch_read64(CVMX_SCR_SCRATCH + 8);
 	} else {
 		/* Get the number of skbuffs in use by the hardware */
-		queue_depth = cvmx_fau_fetch_and_add32(priv->tx_queue[qos].fau, 1);
-		buffers_to_free = cvmx_fau_fetch_and_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE, 0);
+		queue_depth = cvmx_hwfau_fetch_and_add32(priv->tx_queue[qos].fau, 1);
+		buffers_to_free = cvmx_hwfau_fetch_and_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE, 0);
 	}
 
 	/* If we're sending faster than the receive can free them then
@@ -302,7 +305,7 @@ CVM_OCT_XMIT
 
 	if (queue_type == QUEUE_WQE) {
 		if (!work) {
-			work = cvmx_fpa_alloc(wqe_pool);
+			work = cvmx_fpa1_alloc(wqe_pool);
 			if (unlikely(!work)) {
 				netdev_err(dev, "Failed WQE allocate\n");
 				queue_type = QUEUE_DROP;
@@ -342,14 +345,14 @@ CVM_OCT_XMIT
 		if (timestamp_this_skb)
 			word2 |= 1ull << 40; /* Bit 40 controls timestamps */
 
-		if (unlikely(cvmx_pko_send_packet_finish3_pkoid(priv->pko_port,
+		if (unlikely(cvmx_hwpko_send_packet_finish3_pkoid(priv->pko_port,
 							  priv->tx_queue[qos].queue, pko_command, hw_buffer,
 							  word2, CVM_OCT_PKO_LOCK_TYPE))) {
 				queue_type = QUEUE_DROP;
 				netdev_err(dev, "Failed to send the packet with wqe\n");
 		}
 	} else {
-		if (unlikely(cvmx_pko_send_packet_finish_pkoid(priv->pko_port,
+		if (unlikely(cvmx_hwpko_send_packet_finish_pkoid(priv->pko_port,
 							 priv->tx_queue[qos].queue,
 							 pko_command, hw_buffer,
 							 CVM_OCT_PKO_LOCK_TYPE))) {
@@ -362,14 +365,16 @@ CVM_OCT_XMIT
 skip_xmit:
 	switch (queue_type) {
 	case QUEUE_DROP:
-		cvmx_fau_atomic_add32(priv->tx_queue[qos].fau, -1);
+		cvmx_hwfau_atomic_add32(priv->tx_queue[qos].fau, -1);
+		/* Fall through */
+	case QUEUE_DROP_NO_DEC:
 		dev_kfree_skb_any(skb);
 		dev->stats.tx_dropped++;
 		if (work)
-			cvmx_fpa_free(work, wqe_pool, DONT_WRITEBACK(1));
+			cvmx_fpa1_free(work, wqe_pool, DONT_WRITEBACK(1));
 		break;
 	case QUEUE_HW:
-		cvmx_fau_atomic_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE, -buffers_being_recycled);
+		cvmx_hwfau_atomic_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE, -buffers_being_recycled);
 		break;
 	case QUEUE_WQE:
 		/* Cleanup is done on the RX path when the WQE returns */
@@ -377,7 +382,8 @@ skip_xmit:
 	default:
 		BUG();
 	}
-
+	preempt_enable();
+post_preempt_out:
 	if (USE_ASYNC_IOBDMA) {
 		CVMX_SYNCIOBDMA;
 		/* Restore the scratch area */

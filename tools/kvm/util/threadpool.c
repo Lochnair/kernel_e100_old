@@ -124,7 +124,7 @@ static int thread_pool__addthread(void)
 int thread_pool__init(struct kvm *kvm)
 {
 	unsigned long i;
-	unsigned int thread_count = sysconf(_SC_NPROCESSORS_ONLN);
+	unsigned int thread_count = kvm->cfg.nrthreads;
 
 	running = true;
 

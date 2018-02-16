@@ -738,7 +738,7 @@ static struct of_device_id vsc848x_nexus_match[] = {
 };
 MODULE_DEVICE_TABLE(of, vsc848x_nexus_match);
 
-static struct platform_driver mdio_mux_gpio_driver = {
+static struct platform_driver vsc848x_nexus_driver = {
 	.driver = {
 		.name		= "vsc848x-nexus",
 		.owner		= THIS_MODULE,
@@ -752,7 +752,7 @@ static int __init vsc848x_mod_init(void)
 {
 	int rv;
 
-	rv = platform_driver_register(&mdio_mux_gpio_driver);
+	rv = platform_driver_register(&vsc848x_nexus_driver);
 	if (rv)
 		return rv;
 
@@ -765,7 +765,7 @@ module_init(vsc848x_mod_init);
 static void __exit vsc848x_mod_exit(void)
 {
 	phy_driver_unregister(&vsc848x_phy_driver);
-	platform_driver_unregister(&mdio_mux_gpio_driver);
+	platform_driver_unregister(&vsc848x_nexus_driver);
 }
 module_exit(vsc848x_mod_exit);
 

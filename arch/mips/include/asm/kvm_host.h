@@ -20,7 +20,7 @@
 #include <linux/spinlock.h>
 
 
-#define KVM_MAX_VCPUS		8
+#define KVM_MAX_VCPUS		CONFIG_NR_CPUS
 #define KVM_USER_MEM_SLOTS	8
 /* memory slots that does not exposed to userspace */
 #define KVM_PRIVATE_MEM_SLOTS 	0
@@ -115,5 +115,16 @@ struct kvm_vcpu_arch {
 	void *impl;
 };
 
+#ifdef CONFIG_KVM_MIPS_VZ
+
+/* should be maximum of number of pins for each of the irqchips */
+#define KVM_IRQCHIP_NUM_PINS  128
+
+static inline int irqchip_in_kernel(struct kvm *kvm)
+{
+	return 1;
+}
+
+#endif
 
 #endif /* __MIPS_KVM_HOST_H__ */

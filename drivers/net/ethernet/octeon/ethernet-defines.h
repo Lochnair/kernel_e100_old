@@ -27,12 +27,6 @@
 
 /*
  * A few defines are used to control the operation of this driver:
- *  CONFIG_CAVIUM_RESERVE32
- *      This kernel config options controls the amount of memory configured
- *      in a wired TLB entry for all processes to share. If this is set, the
- *      driver will use this memory instead of kernel memory for pools. This
- *      allows 32bit userspace application to access the buffers, but also
- *      requires all received packets to be copied.
  *  USE_SKBUFFS_IN_HW
  *      Tells the driver to populate the packet buffers with kernel skbuffs.
  *      This allows the driver to receive packets without copying them. It also
@@ -68,10 +62,6 @@
 /* TODO: replace this */
 #define CVMX_SCR_SCRATCH (0)
 
-#ifndef CONFIG_CAVIUM_RESERVE32
-#define CONFIG_CAVIUM_RESERVE32 0
-#endif
-
 #define USE_SKBUFFS_IN_HW           1
 #ifdef CONFIG_NETFILTER
 #define REUSE_SKBUFFS_WITHOUT_FREE  0
@@ -87,7 +77,11 @@
 
 /* Enable Random Early Dropping under load */
 #define USE_RED                     1
-#define USE_ASYNC_IOBDMA            (CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0)
+
+/*
+ * Disable async packet IO access because it is causing packet reordering
+ */
+#define USE_ASYNC_IOBDMA            0
 
 /*
  * Allow SW based preamble removal at 10Mbps to workaround PHYs giving
@@ -107,6 +101,7 @@
 
 #define FAU_NUM_PACKET_BUFFERS_TO_FREE (FAU_REG_END - sizeof(u32))
 
+/*TODO: Change this to number valid both for 78xx and other */
 #define TOTAL_NUMBER_OF_PORTS       (CVMX_PIP_NUM_INPUT_PORTS+1)
 
 

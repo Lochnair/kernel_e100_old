@@ -51,7 +51,7 @@
 
 #include <asm/octeon/cvmx-helper.h>
 #include <asm/octeon/cvmx-wqe.h>
-#include <asm/octeon/cvmx-fau.h>
+#include <asm/octeon/cvmx-hwfau.h>
 #include <asm/octeon/cvmx-pow.h>
 #include <asm/octeon/cvmx-pip.h>
 #include <asm/octeon/cvmx-ipd.h>
@@ -64,7 +64,6 @@
 struct cvm_napi_wrapper {
 	struct napi_struct napi;
 	int available;
-	int index;
 } ____cacheline_aligned_in_smp;
 
 static struct cvm_napi_wrapper cvm_oct_napi[NR_CPUS] __cacheline_aligned_in_smp;
@@ -474,7 +473,6 @@ void cvm_oct_rx_initialize(int num_wqe)
 
 	for_each_possible_cpu(i) {
 		cvm_oct_napi[i].available = 1;
-		cvm_oct_napi[i].index = i;
 		netif_napi_add(dev_for_napi, &cvm_oct_napi[i].napi,
 			       cvm_oct_napi_poll, rx_napi_weight);
 		napi_enable(&cvm_oct_napi[i].napi);
@@ -506,7 +504,7 @@ err:
 	return;
 }
 
-void cvm_oct_rx_shutdown0(void)
+void cvm_oct_rx_shutdown0(bool in_crash)
 {
 	int i;
 
@@ -516,19 +514,21 @@ void cvm_oct_rx_shutdown0(void)
 	else
 		cvmx_write_csr(CVMX_POW_WQ_INT_THRX(pow_receive_group), 0);
 
-	/* Free the interrupt handler */
-	free_irq(OCTEON_IRQ_WORKQ0 + pow_receive_group, &cvm_oct_list);
+	if (!in_crash) {
+		/* Free the interrupt handler */
+		free_irq(OCTEON_IRQ_WORKQ0 + pow_receive_group, &cvm_oct_list);
 
 #ifdef CONFIG_SMP
-	octeon_release_ipi_handler(cvm_oct_enable_one_message);
+		octeon_release_ipi_handler(cvm_oct_enable_one_message);
 #endif
 
-	/* Shutdown all of the NAPIs */
-	for_each_possible_cpu(i)
-		netif_napi_del(&cvm_oct_napi[i].napi);
+		/* Shutdown all of the NAPIs */
+		for_each_possible_cpu(i)
+			netif_napi_del(&cvm_oct_napi[i].napi);
+	}
 }
 
-void cvm_oct_rx_shutdown1(void)
+void cvm_oct_rx_shutdown1(bool in_crash)
 {
 	union cvmx_fpa_quex_available queue_available;
 	union cvmx_sso_cfg sso_cfg;
@@ -579,16 +579,18 @@ void cvm_oct_rx_shutdown1(void)
 	sso_cfg.s.rwq_byp_dis = 0;
 	cvmx_write_csr(CVMX_SSO_CFG, sso_cfg.u64);
 
-	for (i = 0; i < 8; i++) {
-		union cvmx_sso_rwq_head_ptrx head_ptr;
-		union cvmx_sso_rwq_tail_ptrx tail_ptr;
+	if (!in_crash) {
+		for (i = 0; i < 8; i++) {
+			union cvmx_sso_rwq_head_ptrx head_ptr;
+			union cvmx_sso_rwq_tail_ptrx tail_ptr;
 
-		head_ptr.u64 = cvmx_read_csr(CVMX_SSO_RWQ_HEAD_PTRX(i));
-		tail_ptr.u64 = cvmx_read_csr(CVMX_SSO_RWQ_TAIL_PTRX(i));
-		WARN_ON(head_ptr.s.ptr != tail_ptr.s.ptr);
+			head_ptr.u64 = cvmx_read_csr(CVMX_SSO_RWQ_HEAD_PTRX(i));
+			tail_ptr.u64 = cvmx_read_csr(CVMX_SSO_RWQ_TAIL_PTRX(i));
+			WARN_ON(head_ptr.s.ptr != tail_ptr.s.ptr);
 
-		mem = phys_to_virt(((u64)head_ptr.s.ptr) << 7);
-		kmem_cache_free(cvm_oct_kmem_sso, mem);
+			mem = phys_to_virt(((u64)head_ptr.s.ptr) << 7);
+			kmem_cache_free(cvm_oct_kmem_sso, mem);
+		}
 	}
 
 	count = 0;
@@ -598,7 +600,8 @@ void cvm_oct_rx_shutdown1(void)
 			pop_fptr.u64 = cvmx_read_csr(CVMX_SSO_RWQ_POP_FPTR);
 			if (pop_fptr.s.val) {
 				mem = phys_to_virt(((u64)pop_fptr.s.fptr) << 7);
-				kmem_cache_free(cvm_oct_kmem_sso, mem);
+				if (!in_crash)
+					kmem_cache_free(cvm_oct_kmem_sso, mem);
 				count++;
 			}
 		} while (pop_fptr.s.val);
@@ -610,8 +613,10 @@ void cvm_oct_rx_shutdown1(void)
 	sso_cfg.s.rwen = 0;
 	sso_cfg.s.rwq_byp_dis = 0;
 	cvmx_write_csr(CVMX_SSO_CFG, sso_cfg.u64);
-	kmem_cache_destroy(cvm_oct_kmem_sso);
-	cvm_oct_kmem_sso = NULL;
+	if (!in_crash) {
+		kmem_cache_destroy(cvm_oct_kmem_sso);
+		cvm_oct_kmem_sso = NULL;
+	}
 
 	/* Clear any FPE indicators, and reenable. */
 	cvmx_write_csr(CVMX_SSO_ERR, 1ull << sso_fpe_bit);

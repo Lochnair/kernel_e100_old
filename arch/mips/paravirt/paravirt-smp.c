@@ -30,7 +30,7 @@ static int __init set_numcpus(char *str)
 	int newval;
 
 	if (get_option(&str, &newval)) {
-		if (newval < 1 || newval >= NR_CPUS)
+		if (newval < 1 || newval > NR_CPUS)
 			goto bad;
 		numcpus = newval;
 		return 0;
@@ -44,7 +44,7 @@ early_param("numcpus", set_numcpus);
 static void paravirt_smp_setup(void)
 {
 	int id;
-	unsigned int cpunum = mips_cpunum();
+	unsigned int cpunum = get_ebase_cpunum();
 
 	if (WARN_ON(cpunum >= NR_CPUS))
 		return;
@@ -105,10 +105,9 @@ static void paravirt_cpus_done(void)
 
 static void paravirt_boot_secondary(int cpu, struct task_struct *idle)
 {
-	paravirt_smp_gp[cpu] = (unsigned long)(task_thread_info(idle));
-	wmb();
+	paravirt_smp_gp[cpu] = (unsigned long)task_thread_info(idle);
+	smp_wmb();
 	paravirt_smp_sp[cpu] = __KSTK_TOS(idle);
-	mb();
 }
 
 static irqreturn_t paravirt_reched_interrupt(int irq, void *dev_id)

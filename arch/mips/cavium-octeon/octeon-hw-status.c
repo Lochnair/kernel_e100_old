@@ -556,22 +556,22 @@ static bool unuse_node(struct octeon_hw_status_node *n, bool *oflow, int *levp)
 				break;
 
 		/* if sum/mask, remove from mask */
-				if (!n->is_hwint && n->mask_reg) {
-					u64 mask = 1ull << n->bit;
-					u64 csr = cvmx_read_csr(n->mask_reg);
-					csr &= ~mask;
-					cvmx_write_csr(n->mask_reg, csr);
-				}
+		if (!n->is_hwint && n->mask_reg) {
+			u64 mask = 1ull << n->bit;
+			u64 csr = cvmx_read_csr(n->mask_reg);
+			csr &= ~mask;
+			cvmx_write_csr(n->mask_reg, csr);
+		}
 
 		/* edit self out of chain */
 		if (pw)
-				*pw = n->next;
+			*pw = n->next;
 
-				if (n->is_hwint && n->own_irq) {
-					write_unlock(&octeon_hw_status_lock);
+		if (n->is_hwint && n->own_irq) {
+			write_unlock(&octeon_hw_status_lock);
 			locked = false;
-					free_irq(n->irq, n);
-				}
+			free_irq(n->irq, n);
+		}
 
 		if (!pw) {
 			/* "Can't Happen", so log */

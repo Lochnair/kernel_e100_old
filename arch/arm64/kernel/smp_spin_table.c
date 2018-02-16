@@ -23,6 +23,8 @@
 
 #include <asm/cacheflush.h>
 #include <asm/cputype.h>
+#include <asm/cpu_ops.h>
+#include <asm/cputype.h>
 #include <asm/smp_plat.h>
 
 extern void secondary_holding_pen(void);
@@ -37,7 +39,7 @@ static DEFINE_RAW_SPINLOCK(boot_lock);
  * in coherency or not.  This is necessary for the hotplug code to work
  * reliably.
  */
-static void __cpuinit write_pen_release(u64 val)
+static void write_pen_release(u64 val)
 {
 	void *start = (void *)&secondary_holding_pen_release;
 	unsigned long size = sizeof(secondary_holding_pen_release);
@@ -46,7 +48,8 @@ static void __cpuinit write_pen_release(u64 val)
 	__flush_dcache_area(start, size);
 }
 
-static int __cpuinit smp_spin_table_cpu_init(struct device_node *dn, unsigned int cpu)
+
+static int smp_spin_table_cpu_init(struct device_node *dn, unsigned int cpu)
 {
 	/*
 	 * Determine the address from which the CPU is polling.
@@ -62,7 +65,7 @@ static int __cpuinit smp_spin_table_cpu_init(struct device_node *dn, unsigned in
 	return 0;
 }
 
-static int __cpuinit smp_spin_table_cpu_prepare(unsigned int cpu)
+static int smp_spin_table_cpu_prepare(unsigned int cpu)
 {
 	void **release_addr;
 
@@ -81,7 +84,7 @@ static int __cpuinit smp_spin_table_cpu_prepare(unsigned int cpu)
 	return 0;
 }
 
-static int __cpuinit smp_spin_table_cpu_boot(unsigned int cpu)
+static int smp_spin_table_cpu_boot(unsigned int cpu)
 {
 	unsigned long timeout;
 
@@ -131,7 +134,7 @@ void smp_spin_table_cpu_postboot(void)
 	raw_spin_unlock(&boot_lock);
 }
 
-const struct smp_operations smp_spin_table_ops = {
+const struct cpu_operations smp_spin_table_ops = {
 	.name		= "spin-table",
 	.cpu_init	= smp_spin_table_cpu_init,
 	.cpu_prepare	= smp_spin_table_cpu_prepare,

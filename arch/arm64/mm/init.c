@@ -31,7 +31,6 @@
 #include <linux/sort.h>
 #include <linux/of_fdt.h>
 
-#include <asm/prom.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/sizes.h>
@@ -153,6 +152,9 @@ void __init arm64_memblock_init(void)
 	 */
 	memblock_reserve(__pa(swapper_pg_dir), SWAPPER_DIR_SIZE);
 	memblock_reserve(__pa(idmap_pg_dir), IDMAP_DIR_SIZE);
+#ifdef CONFIG_PAX_KERNEXEC
+	memblock_reserve(__pa(swapper_pg_dir_pax), SWAPPER_DIR_SIZE);
+#endif
 
 	/* Reserve the dtb region */
 	memblock_reserve(virt_to_phys(initial_boot_params),
@@ -262,7 +264,7 @@ static void __init free_unused_memmap(void)
 		 * memmap entries are valid from the bank end aligned to
 		 * MAX_ORDER_NR_PAGES.
 		 */
-		prev_end = ALIGN(start + __phys_to_pfn(reg->size),
+		prev_end = ALIGN(__phys_to_pfn(reg->base + reg->size),
 				 MAX_ORDER_NR_PAGES);
 	}
 
@@ -386,6 +388,52 @@ void __init mem_init(void)
 
 void free_initmem(void)
 {
+#ifdef CONFIG_PAX_KERNEXEC
+	unsigned long addr;
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+
+	/* make pages tables, etc before .text NX in both 
+	 * primary and secondary page table
+	 */
+	for (addr = PAGE_OFFSET; addr < (unsigned long)_text; 
+			addr += SECTION_SIZE) {
+		pgd = pgd_offset_k(addr);
+		pud = pud_offset(pgd, addr);
+		pmd = pmd_offset(pud, addr);
+		set_pmd(pmd, ( *pmd | PMD_SECT_UXN | PMD_SECT_PXN)); 
+	
+		pgd = pgd_offset_pax(addr);
+		pud = pud_offset(pgd, addr);
+		pmd = pmd_offset(pud, addr);
+		set_pmd(pmd, ( *pmd | PMD_SECT_UXN | PMD_SECT_PXN)); 
+	}
+	
+	/* make init NX */
+	for (addr = (unsigned long)__init_begin; 
+			addr < (unsigned long)__init_end;
+			addr += SECTION_SIZE) {
+		pgd = pgd_offset_k(addr);
+		pud = pud_offset(pgd, addr);
+		pmd = pmd_offset(pud, addr);
+		set_pmd(pmd, ( *pmd | PMD_SECT_UXN | PMD_SECT_PXN)); 
+
+		pgd = pgd_offset_pax(addr);
+		pud = pud_offset(pgd, addr);
+		pmd = pmd_offset(pud, addr);
+		set_pmd(pmd, ( *pmd | PMD_SECT_UXN | PMD_SECT_PXN)); 
+	}
+	
+	/* make kernel code/rodata RX */
+	for (addr = (unsigned long)_stext; addr < (unsigned long)_etext;
+			addr += SECTION_SIZE) {
+		pgd = pgd_offset_k(addr);
+		pud = pud_offset(pgd, addr);
+		pmd = pmd_offset(pud, addr);
+		set_pmd(pmd, ( *pmd | PMD_SECT_RDONLY)); 
+	}
+#endif
 	poison_init_mem(__init_begin, __init_end - __init_begin);
 	free_initmem_default(0);
 }

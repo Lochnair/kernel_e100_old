@@ -14,7 +14,24 @@
 # Based on the ia64 boot/Makefile.
 #
 
-targets := Image Image.gz
+targets := Image Image.gz uImage
+
+ifneq ($(LOADADDR),)
+  UIMAGE_LOADADDR=$(LOADADDR)
+endif
+
+check_for_multiple_loadaddr = \
+if [ $(words $(UIMAGE_LOADADDR)) -ne 1 ]; then \
+	echo 'multiple (or no) load addresses: $(UIMAGE_LOADADDR)'; \
+	echo 'This is incompatible with uImages'; \
+	echo 'Specify LOADADDR on the commandline to build an uImage'; \
+	false; \
+fi
+
+$(obj)/uImage:  $(obj)/Image FORCE
+	@$(check_for_multiple_loadaddr)
+	$(call if_changed,uimage)
+	@$(kecho) '  Image $@ is ready'
 
 $(obj)/Image: vmlinux FORCE
 	$(call if_changed,objcopy)

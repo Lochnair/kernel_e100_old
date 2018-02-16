@@ -204,7 +204,7 @@ static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 
 	queue		= &bdev->vqs[vq];
 	queue->pfn	= pfn;
-	p		= guest_flat_to_host(kvm, queue->pfn * page_size);
+	p		= virtio_get_vq(kvm, queue->pfn, page_size);
 
 	thread_pool__init_job(&bdev->jobs[vq], kvm, virtio_bln_do_io, queue);
 	vring_init(&queue->vring, VIRTIO_BLN_QUEUE_SIZE, p, align);
@@ -262,7 +262,7 @@ int virtio_bln__init(struct kvm *kvm)
 	memset(&bdev.config, 0, sizeof(struct virtio_balloon_config));
 
 	virtio_init(kvm, &bdev, &bdev.vdev, &bln_dev_virtio_ops,
-		    VIRTIO_DEFAULT_TRANS, PCI_DEVICE_ID_VIRTIO_BLN,
+		    VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_BLN,
 		    VIRTIO_ID_BALLOON, PCI_CLASS_BLN);
 
 	if (compat_id == -1)

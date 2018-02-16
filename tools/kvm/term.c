@@ -22,7 +22,9 @@ static struct termios	orig_term;
 int term_escape_char	= 0x01; /* ctrl-a is used for escape */
 bool term_got_escape	= false;
 
-int term_fds[KVM_NUM_TERM][2];
+int term_fds[TERM_MAX_DEVS][2];
+
+static pthread_t term_poll_thread;
 
 int term_getc(struct kvm *kvm, int term)
 {
@@ -55,7 +57,7 @@ int term_putc(char *addr, int cnt, int term)
 	while (num_remaining) {
 		ret = write(term_fds[term][TERM_FD_OUT], addr, num_remaining);
 		if (ret < 0)
-			return 0;
+			return cnt - num_remaining;
 		num_remaining -= ret;
 		addr += ret;
 	}
@@ -89,15 +91,43 @@ bool term_readable(int term)
 		.events	= POLLIN,
 		.revents = 0,
 	};
+	int err;
 
-	return poll(&pollfd, 1, 0) > 0;
+	err = poll(&pollfd, 1, 0);
+	return (err > 0 && (pollfd.revents & POLLIN));
+}
+
+static void *term_poll_thread_loop(void *param)
+{
+	struct pollfd fds[TERM_MAX_DEVS];
+	struct kvm *kvm = (struct kvm *) param;
+
+	int i;
+
+	kvm__set_thread_name("term-poll");
+
+	for (i = 0; i < TERM_MAX_DEVS; i++) {
+		fds[i].fd = term_fds[i][TERM_FD_IN];
+		fds[i].events = POLLIN;
+		fds[i].revents = 0;
+	}
+
+	while (1) {
+		/* Poll with infinite timeout */
+		if(poll(fds, TERM_MAX_DEVS, -1) < 1)
+			break;
+		kvm__arch_read_term(kvm);
+	}
+
+	die("term_poll_thread_loop: error polling device fds %d\n", errno);
+	return NULL;
 }
 
 static void term_cleanup(void)
 {
 	int i;
 
-	for (i = 0; i < KVM_NUM_TERM; i++)
+	for (i = 0; i < TERM_MAX_DEVS; i++)
 		tcsetattr(term_fds[i][TERM_FD_IN], TCSANOW, &orig_term);
 }
 
@@ -143,6 +173,15 @@ int term_init(struct kvm *kvm)
 	struct termios term;
 	int i, r;
 
+	for (i = 0; i < TERM_MAX_DEVS; i++)
+		if (term_fds[i][TERM_FD_IN] == 0) {
+			term_fds[i][TERM_FD_IN] = STDIN_FILENO;
+			term_fds[i][TERM_FD_OUT] = STDOUT_FILENO;
+		}
+
+	if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+		return 0;
+
 	r = tcgetattr(STDIN_FILENO, &orig_term);
 	if (r < 0) {
 		pr_warning("unable to save initial standard input settings");
@@ -154,11 +193,10 @@ int term_init(struct kvm *kvm)
 	term.c_lflag &= ~(ICANON | ECHO | ISIG);
 	tcsetattr(STDIN_FILENO, TCSANOW, &term);
 
-	for (i = 0; i < KVM_NUM_TERM; i++)
-		if (term_fds[i][TERM_FD_IN] == 0) {
-			term_fds[i][TERM_FD_IN] = STDIN_FILENO;
-			term_fds[i][TERM_FD_OUT] = STDOUT_FILENO;
-		}
+
+	/* Use our own blocking thread to read stdin, don't require a tick */
+	if(pthread_create(&term_poll_thread, NULL, term_poll_thread_loop,kvm))
+		die("Unable to create console input poll thread\n");
 
 	signal(SIGTERM, term_sig_cleanup);
 	atexit(term_cleanup);

@@ -57,6 +57,7 @@ OBJS	+= guest_compat.o
 OBJS	+= hw/rtc.o
 OBJS	+= hw/serial.o
 OBJS	+= ioport.o
+OBJS	+= irq.o
 OBJS	+= kvm-cpu.o
 OBJS	+= kvm.o
 OBJS	+= main.o
@@ -86,6 +87,7 @@ OBJS	+= net/uip/csum.o
 OBJS	+= net/uip/dhcp.o
 OBJS	+= kvm-cmd.o
 OBJS	+= util/init.o
+OBJS    += util/iovec.o
 OBJS	+= util/rbtree.o
 OBJS	+= util/threadpool.o
 OBJS	+= util/parse-options.o
@@ -113,9 +115,6 @@ ifeq ($(ARCH),x86_64)
 	ARCH         := x86
 	DEFINES      += -DCONFIG_X86_64
 endif
-
-LIBFDT_SRC = fdt.o fdt_ro.o fdt_wip.o fdt_sw.o fdt_rw.o fdt_strerror.o
-LIBFDT_OBJS = $(patsubst %,../../scripts/dtc/libfdt/%,$(LIBFDT_SRC))
 
 ### Arch-specific stuff
 
@@ -150,47 +149,45 @@ ifeq ($(ARCH), powerpc)
 	OBJS	+= powerpc/spapr_hvcons.o
 	OBJS	+= powerpc/spapr_pci.o
 	OBJS	+= powerpc/xics.o
-# We use libfdt, but it's sometimes not packaged 64bit.  It's small too,
-# so just build it in:
-	CFLAGS 	+= -I../../scripts/dtc/libfdt
-	OTHEROBJS	+= $(LIBFDT_OBJS)
 	ARCH_INCLUDE := powerpc/include
 	CFLAGS 	+= -m64
+	LDFLAGS += -m elf64ppc
+
+	ARCH_WANT_LIBFDT := y
 endif
 
 # ARM
 OBJS_ARM_COMMON		:= arm/fdt.o arm/gic.o arm/ioport.o arm/irq.o \
-			   arm/kvm.o arm/kvm-cpu.o
+			   arm/kvm.o arm/kvm-cpu.o arm/pci.o arm/timer.o
 HDRS_ARM_COMMON		:= arm/include
 ifeq ($(ARCH), arm)
 	DEFINES		+= -DCONFIG_ARM
 	OBJS		+= $(OBJS_ARM_COMMON)
-	OBJS		+= arm/aarch32/cortex-a15.o
+	OBJS		+= arm/aarch32/arm-cpu.o
 	OBJS		+= arm/aarch32/kvm-cpu.o
 	ARCH_INCLUDE	:= $(HDRS_ARM_COMMON)
 	ARCH_INCLUDE	+= -Iarm/aarch32/include
 	CFLAGS		+= -march=armv7-a
-	CFLAGS		+= -I../../scripts/dtc/libfdt
-	OTHEROBJS	+= $(LIBFDT_OBJS)
+
+	ARCH_WANT_LIBFDT := y
 endif
 
 # ARM64
 ifeq ($(ARCH), arm64)
 	DEFINES		+= -DCONFIG_ARM64
 	OBJS		+= $(OBJS_ARM_COMMON)
-	OBJS		+= arm/aarch64/cortex-a57.o
+	OBJS		+= arm/aarch64/arm-cpu.o
 	OBJS		+= arm/aarch64/kvm-cpu.o
 	ARCH_INCLUDE	:= $(HDRS_ARM_COMMON)
 	ARCH_INCLUDE	+= -Iarm/aarch64/include
-	CFLAGS		+= -I../../scripts/dtc/libfdt
-	OTHEROBJS	+= $(LIBFDT_OBJS)
+
+	ARCH_WANT_LIBFDT := y
 endif
 
+# MIPS (octeon3)
 ifeq ($(ARCH),mips)
 	DEFINES		+= -DCONFIG_MIPS
 	ARCH_INCLUDE	:= mips/include
-	CFLAGS		+= -I../../arch/mips/include/asm/mach-cavium-octeon
-	CFLAGS		+= -I../../arch/mips/include/asm/mach-generic
 	OBJS		+= mips/kvm.o
 	OBJS		+= mips/kvm-cpu.o
 	OBJS		+= mips/irq.o
@@ -205,6 +202,18 @@ endif
 
 ###
 
+# libfdt support
+
+LIBFDT_SRC = fdt.o fdt_ro.o fdt_wip.o fdt_sw.o fdt_rw.o fdt_strerror.o
+LIBFDT_OBJS = $(patsubst %,../../scripts/dtc/libfdt/%,$(LIBFDT_SRC))
+
+ifeq (y,$(ARCH_WANT_LIBFDT))
+	DEFINES		+= -DCONFIG_HAS_LIBFDT
+	OTHEROBJS	+= $(LIBFDT_OBJS)
+endif
+
+###
+
 # Detect optional features.
 # On a given system, some libs may link statically, some may not; so, check
 # both and only build those that link!
@@ -214,6 +223,15 @@ ifeq ($(call try-cc,$(SOURCE_BFD),$(FLAGS_BFD) -static),y)
 	CFLAGS_STATOPT	+= -DCONFIG_HAS_BFD
 	OBJS_STATOPT	+= symbol.o
 	LIBS_STATOPT	+= -lbfd
+endif
+
+FLAGS_GTK3 := $(CFLAGS) $(shell pkg-config --libs --cflags gtk+-3.0 2>/dev/null)
+ifeq ($(call try-cc,$(SOURCE_GTK3),$(FLAGS_GTK3)),y)
+	OBJS_DYNOPT	+= ui/gtk3.o
+	CFLAGS_DYNOPT	+= -DCONFIG_HAS_GTK3 $(shell pkg-config --cflags gtk+-3.0 2>/dev/null)
+	LIBS_DYNOPT	+= $(shell pkg-config --libs gtk+-3.0 2>/dev/null)
+else
+    $(warning warning GTK3 not found, disables GTK3 support. Please install gtk3-devel or libgtk3.0-dev)
 endif
 
 FLAGS_VNCSERVER := $(CFLAGS) -lvncserver
@@ -285,7 +303,7 @@ DEFINES	+= -DKVMTOOLS_VERSION='"$(KVMTOOLS_VERSION)"'
 DEFINES	+= -DBUILD_ARCH='"$(ARCH)"'
 
 KVM_INCLUDE := include
-CFLAGS	+= $(CPPFLAGS) $(DEFINES) -I$(KVM_INCLUDE) -I$(ARCH_INCLUDE) -I$(KINCL_PATH)/include/uapi -I$(KINCL_PATH)/include -I$(KINCL_PATH)/arch/$(ARCH)/include/uapi -I$(KINCL_PATH)/arch/$(ARCH)/include/ -O2 -fno-strict-aliasing -g
+CFLAGS	+= $(CPPFLAGS) $(DEFINES) -I$(KVM_INCLUDE) -I$(ARCH_INCLUDE) -I$(KINCL_PATH)/include/uapi -I$(KINCL_PATH)/include -I$(KINCL_PATH)/arch/$(ARCH)/include/uapi -I$(KINCL_PATH)/arch/$(ARCH)/include/ -I$(KINCL_PATH)/scripts/dtc/libfdt -O2 -fno-strict-aliasing -g
 
 WARNINGS += -Wall
 WARNINGS += -Wformat=2
@@ -316,10 +334,6 @@ all: arch_support_check $(PROGRAM) $(PROGRAM_ALIAS) $(GUEST_INIT)
 arch_support_check:
 	$(UNSUPP_ERR)
 
-KVMTOOLS-VERSION-FILE:
-	@$(SHELL_PATH) util/KVMTOOLS-VERSION-GEN $(OUTPUT)
--include $(OUTPUT)KVMTOOLS-VERSION-FILE
-
 # When building -static all objects are built with appropriate flags, which
 # may differ between static & dynamic .o.  The objects are separated into
 # .o and .static.o.  See the %.o: %.c rules below.
@@ -327,7 +341,7 @@ KVMTOOLS-VERSION-FILE:
 # $(OTHEROBJS) are things that do not get substituted like this.
 #
 STATIC_OBJS = $(patsubst %.o,%.static.o,$(OBJS) $(OBJS_STATOPT))
-#GUEST_OBJS = guest/guest_init.o
+GUEST_OBJS = guest/guest_init.o
 
 $(PROGRAM)-static:  $(DEPS) $(STATIC_OBJS) $(OTHEROBJS) $(GUEST_INIT)
 	$(E) "  LINK    " $@
@@ -344,7 +358,10 @@ $(PROGRAM_ALIAS): $(PROGRAM)
 $(GUEST_INIT): guest/init.c
 	$(E) "  LINK    " $@
 	$(Q) $(CC) -static guest/init.c -o $@
-	$(Q) $(LD) -r -b binary -o guest/guest_init.o $(GUEST_INIT)
+	$(Q) $(LD) $(LDFLAGS) -r -b binary -o guest/guest_init.o $(GUEST_INIT)
+ifeq ($(ARCH),mips)
+	$(Q) util/mips-fix-e_flags.sh
+endif
 
 $(DEPS):
 
@@ -496,5 +513,12 @@ cscope:
 	$(Q) $(CSCOPE) -bkqu
 .PHONY: cscope
 
-# Deps
+#
+# Escape redundant work on cleaning up
+ifneq ($(MAKECMDGOALS),clean)
 -include $(DEPS)
+
+KVMTOOLS-VERSION-FILE:
+	@$(SHELL_PATH) util/KVMTOOLS-VERSION-GEN $(OUTPUT)
+-include $(OUTPUT)KVMTOOLS-VERSION-FILE
+endif

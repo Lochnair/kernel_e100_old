@@ -20,6 +20,9 @@
 
 #define ESR_EL1_EC_SHIFT	(26)
 #define ESR_EL1_IL		(1U << 25)
+#ifdef CONFIG_PAX_PAGEEXEC
+#define ESR_EL0_ISS_IABT	(1U << 24)
+#endif
 
 #define ESR_EL1_EC_UNKNOWN	(0x00)
 #define ESR_EL1_EC_WFI		(0x01)

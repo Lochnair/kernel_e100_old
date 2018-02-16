@@ -43,6 +43,7 @@
 
 	PTR_LA	t1, paravirt_smp_gp
 	PTR_ADDU t1, t1, t0
+	sync
 	PTR_L	gp, 0(t1)
 	.endm
 

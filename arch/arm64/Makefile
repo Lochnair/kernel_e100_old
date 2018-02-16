@@ -22,8 +22,8 @@ KBUILD_DEFCONFIG := defconfig
 KBUILD_CFLAGS	+= -mgeneral-regs-only
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
-ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
-KBUILD_CPPFLAGS += -mbig-endian
+ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
+KBUILD_CPPFLAGS	+= -mbig-endian
 AS		+= -EB
 LD		+= -EB
 LDFLAGS		+= -maarch64linuxb
@@ -40,9 +40,6 @@ CHECKFLAGS	+= -D__aarch64__
 
 # Default value
 head-y		:= arch/arm64/kernel/head.o
-
-# PCIe support
-drivers-$(CONFIG_PCI)       += arch/arm64/pci/
 
 # The byte offset of the kernel image in RAM from the start of RAM.
 TEXT_OFFSET := 0x00080000
@@ -61,7 +58,7 @@ all:	$(KBUILD_IMAGE) $(KBUILD_DTBS)
 
 boot := arch/arm64/boot
 
-Image Image.gz: vmlinux
+Image Image.gz uImage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 zinstall install: vmlinux
@@ -80,6 +77,7 @@ archclean:
 define archhelp
   echo  '* Image.gz      - Compressed kernel image (arch/$(ARCH)/boot/Image.gz)'
   echo  '  Image         - Uncompressed kernel image (arch/$(ARCH)/boot/Image)'
+  echo  '  uImage        - Uncompressed u-boot image (arch/$(ARCH)/boot/uImage)'
   echo  '* dtbs          - Build device tree blobs for enabled boards'
   echo  '  install       - Install uncompressed kernel'
   echo  '  zinstall      - Install compressed kernel'

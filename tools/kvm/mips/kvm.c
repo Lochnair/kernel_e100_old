@@ -9,10 +9,12 @@
 #include <elf.h>
 
 struct kvm_ext kvm_req_ext[] = {
+	{ DEFINE_KVM_EXT(KVM_CAP_IRQ_ROUTING) },
+	{ DEFINE_KVM_EXT(KVM_CAP_IRQCHIP) },
 	{ 0, 0 }
 };
 
-void kvm__arch_periodic_poll(struct kvm *kvm)
+void kvm__arch_read_term(struct kvm *kvm)
 {
 	virtio_console__inject_interrupt(kvm);
 }
@@ -22,11 +24,28 @@ void kvm__init_ram(struct kvm *kvm)
 	u64	phys_start, phys_size;
 	void	*host_mem;
 
-	phys_start = 0;
-	phys_size  = kvm->ram_size;
-	host_mem   = kvm->ram_start;
+	if (kvm->ram_size <= KVM_MMIO_START) {
+		/* one region for all memory */
+		phys_start = 0;
+		phys_size  = kvm->ram_size;
+		host_mem   = kvm->ram_start;
 
-	kvm__register_mem(kvm, phys_start, phys_size, host_mem);
+		kvm__register_mem(kvm, phys_start, phys_size, host_mem);
+	} else {
+		/* one region for memory that fits below MMIO range */
+		phys_start = 0;
+		phys_size  = KVM_MMIO_START;
+		host_mem   = kvm->ram_start;
+
+		kvm__register_mem(kvm, phys_start, phys_size, host_mem);
+
+		/* one region for rest of memory */
+		phys_start = KVM_MMIO_START + KVM_MMIO_SIZE;
+		phys_size  = kvm->ram_size - KVM_MMIO_START;
+		host_mem   = kvm->ram_start + KVM_MMIO_START;
+
+		kvm__register_mem(kvm, phys_start, phys_size, host_mem);
+	}
 }
 
 void kvm__arch_delete_ram(struct kvm *kvm)
@@ -108,8 +127,15 @@ static void kvm__mips_install_cmdline(struct kvm *kvm)
 	u64 argv_offset = argv_start;
 	u64 argc = 0;
 
-	sprintf(p + cmdline_offset, "mem=0x%llx@0 ",
-		 (unsigned long long)kvm->ram_size);
+
+	if ((u64) kvm->ram_size <= KVM_MMIO_START)
+		sprintf(p + cmdline_offset, "mem=0x%llx@0 ",
+			(unsigned long long)kvm->ram_size);
+	else
+		sprintf(p + cmdline_offset, "mem=0x%llx@0 mem=0x%llx@0x%llx ",
+			(unsigned long long)KVM_MMIO_START,
+			(unsigned long long)kvm->ram_size - KVM_MMIO_START,
+			(unsigned long long)(KVM_MMIO_START + KVM_MMIO_SIZE));
 
 	strcat(p + cmdline_offset, kvm->cfg.real_cmdline); /* maximum size is 2K */
 
@@ -202,10 +228,10 @@ static bool kvm__arch_get_elf_64_info(Elf64_Ehdr *ehdr, int fd_kernel,
 
 	ei->load_addr = phdr.p_paddr;
 
-	if ((ei->load_addr & 0xffffffffc0000000ul) == 0xffffffff80000000ul)
+	if ((ei->load_addr & 0xffffffffc0000000ull) == 0xffffffff80000000ull)
 		ei->load_addr &= 0x1ffffffful; /* Convert KSEG{0,1} to physical. */
-	if ((ei->load_addr & 0xc000000000000000ul) == 0x8000000000000000ul)
-		ei->load_addr &= 0x07fffffffffffffful; /* Convert XKPHYS to pysical */
+	if ((ei->load_addr & 0xc000000000000000ull) == 0x8000000000000000ull)
+		ei->load_addr &= 0x07ffffffffffffffull; /* Convert XKPHYS to pysical */
 
 
 	ei->len = phdr.p_filesz;
@@ -248,8 +274,8 @@ static bool kvm__arch_get_elf_32_info(Elf32_Ehdr *ehdr, int fd_kernel,
 
 	ei->load_addr = (s64)((s32)phdr.p_paddr);
 
-	if ((ei->load_addr & 0xffffffffc0000000ul) == 0xffffffff80000000ul)
-		ei->load_addr &= 0x1ffffffful; /* Convert KSEG{0,1} to physical. */
+	if ((ei->load_addr & 0xffffffffc0000000ull) == 0xffffffff80000000ull)
+		ei->load_addr &= 0x1fffffffull; /* Convert KSEG{0,1} to physical. */
 
 	ei->len = phdr.p_filesz;
 	ei->offset = phdr.p_offset;
@@ -323,8 +349,6 @@ int load_elf_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *k
 	return true;
 }
 
-bool load_bzimage(struct kvm *kvm, int fd_kernel, int fd_initrd,
-		  const char *kernel_cmdline)
+void ioport__map_irq(u8 *irq)
 {
-	return false;
 }

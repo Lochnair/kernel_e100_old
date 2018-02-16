@@ -8,7 +8,50 @@
 
 #include <asm/stackframe.h>
 
-#define START_GUEST_STACK_ADJUST (8 * 11)
+#ifdef CONFIG_SMP
+	.macro	set_mips_kvm_rootsp stackp temp
+	CPU_ID_MFC0	\temp, CPU_ID_REG
+	LONG_SRL	\temp, PTEBASE_SHIFT
+	andi	k0, CPU_ID_MASK /* high bits indicate guest mode. */
+	LONG_S	\stackp, mips_kvm_rootsp(\temp)
+	.endm
+
+	.macro	get_mips_kvm_rootsp	/* SMP variation */
+# if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+	lui	k1, %hi(mips_kvm_rootsp)
+# else
+	lui	k1, %highest(mips_kvm_rootsp)
+	daddiu	k1, %higher(mips_kvm_rootsp)
+	dsll	k1, 16
+	daddiu	k1, %hi(mips_kvm_rootsp)
+	dsll	k1, 16
+# endif
+	LONG_SRL	k0, PTEBASE_SHIFT
+	andi	k0, CPU_ID_MASK /* high bits indicate guest mode. */
+	LONG_ADDU	k1, k0
+	LONG_L	k1, %lo(mips_kvm_rootsp)(k1)
+	.endm
+#else /* Uniprocessor */
+	.macro	set_mips_kvm_rootsp stackp temp
+	LONG_S	\stackp, mips_kvm_rootsp
+	.endm
+
+	.macro	get_mips_kvm_rootsp	/* Uniprocessor variation */
+# if defined(CONFIG_32BIT) || defined(KBUILD_64BIT_SYM32)
+	lui	k1, %hi(mips_kvm_rootsp)
+# else
+	lui	k1, %highest(mips_kvm_rootsp)
+	daddiu	k1, %higher(mips_kvm_rootsp)
+	dsll	k1, k1, 16
+	daddiu	k1, %hi(mips_kvm_rootsp)
+	dsll	k1, k1, 16
+# endif
+	LONG_L	k1, %lo(mips_kvm_rootsp)(k1)
+	.endm
+#endif
+
+#define START_GUEST_STACK_ADJUST (8 * 12)
+#define VCPU_STACK_OFFSET (8 * 11)
 	.set noreorder
 	.p2align 5
 LEAF(mipsvz_start_guest)
@@ -29,6 +72,7 @@ LEAF(mipsvz_start_guest)
 	/*	$29, sp */
 	sd	$30, (9 * 8)(sp)
 	sd	$31, (10 * 8)(sp)
+	sd	a0, VCPU_STACK_OFFSET(sp)
 
 	/* Save sp in the CPU specific slot */
 	set_mips_kvm_rootsp sp, v0
@@ -41,16 +85,15 @@ LEAF(mipsvz_start_guest)
 	ori	v0, ST0_EXL | ST0_IE
 	mtc0	v0, CP0_STATUS
 
-	dli	v0,1
 	/* Set GuestMode (GM) bit */
 	mfc0	v1, CP0_GUESTCTL0
 	ins	v1, v0, MIPS_GUESTCTL0B_GM, 1
 	mtc0	v1, CP0_GUESTCTL0
 
-	/* Set the high order bit of CPU_ID_REG to indicate guest mode. */
-	dmfc0	v1, CPU_ID_REG
-	dins	v1, v0, 63, 1
-	dmtc0	v1, CPU_ID_REG
+	PTR_LA	v1, mipsvz_ebase_page
+	LONG_L	v1, 0(v1)
+	ori	v1, 1 << 11
+	MTC0	v1, CP0_EBASE
 
 	/* Load Guest register state */
 	ld	v0, KVM_VCPU_ARCH_EPC(a0)
@@ -93,6 +136,9 @@ LEAF(mipsvz_start_guest)
 	ld	$30, KVM_VCPU_ARCH_R30(a0)
 	ld	$31, KVM_VCPU_ARCH_R31(a0)
 	ld	$4, KVM_VCPU_ARCH_R4(a0) /* $4 == a0, do it last. */
+#ifdef CONFIG_CAVIUM_ERET_MISPREDICT_WORKAROUND
+	dmtc0	$0, $30,7		/* force misprediction for ERET */
+#endif
 	eret
 	.set	pop
 
@@ -232,3 +278,234 @@ LEAF(mipsvz_readout_fpu)
 	 sw	t0, KVM_VCPU_ARCH_FIR(a0)
 
 	END(mipsvz_readout_fpu)
+
+	.macro	mipsvz_chain_header target
+	MTC0	k0, CP0_KSCRATCH1
+	MTC0	k1, CP0_KSCRATCH2
+	CPU_ID_MFC0	k0, CPU_ID_REG
+	get_mips_kvm_rootsp
+	PTR_SUBU k1, KVM_MIPS_VZ_REGS_SIZE
+	LONG_S	sp, PT_R29(k1)
+	move	sp, k1
+	LONG_S	$1, PT_R1(sp)
+	LONG_S	$2, PT_R2(sp)
+	MFC0	v0, CP0_EPC
+	LONG_S	$3, PT_R3(sp)
+	LONG_S	$4, PT_R4(sp)
+	LONG_S	$5, PT_R5(sp)
+	LONG_S	$6, PT_R6(sp)
+	LONG_S	v0, PT_EPC(sp)
+	LONG_S	$16, PT_R16(sp)
+	PTR_LI	$16, \target
+	PTR_LA	v1, mipsvz_common_chain
+	jr	v1
+	 LONG_S	$7, PT_R7(sp)
+	.endm
+
+
+LEAF(mipsvz_interrupt_chain)
+	.set	push
+	.set	noat
+	mipsvz_chain_header 0x200
+	.set	pop
+.Lmipsvz_interrupt_chain_end:
+FEXPORT(mipsvz_interrupt_chain_end)
+	END(mipsvz_interrupt_chain)
+
+LEAF(mipsvz_general_chain)
+	.set	push
+	.set	noat
+	mipsvz_chain_header 0
+	.set	pop
+.Lmipsvz_general_chain_end:
+FEXPORT(mipsvz_general_chain_end)
+	END(mipsvz_general_chain)
+
+
+LEAF(mipsvz_common_chain)
+	.set	push
+	.set	noat
+	mfhi	v0
+	LONG_S	$8, PT_R8(sp)
+	LONG_S	$9, PT_R9(sp)
+	LONG_S	$10, PT_R10(sp)
+	LONG_S	$11, PT_R11(sp)
+	LONG_S	v0, PT_HI(sp)
+	mflo	v0
+	LONG_S	$12, PT_R12(sp)
+	LONG_S	$13, PT_R13(sp)
+	LONG_S	$17, PT_R17(sp)
+	LONG_S	$18, PT_R18(sp)
+	LONG_S	v0, PT_LO(sp)
+	mfc0	$17, CP0_STATUS /* Status in $17 */
+	LONG_S	$14, PT_R14(sp)
+	LONG_S	$15, PT_R15(sp)
+	LONG_S	$19, PT_R19(sp)
+	LONG_S	$17, PT_STATUS(sp)
+	MFC0	k0, CP0_KSCRATCH1
+	LONG_S	$20, PT_R20(sp)
+	LONG_S	$21, PT_R21(sp)
+	LONG_S	$22, PT_R22(sp)
+	MFC0	k1, CP0_KSCRATCH2
+	LONG_S	$23, PT_R23(sp)
+	LONG_S	$24, PT_R24(sp)
+	LONG_S	$25, PT_R25(sp)
+	mfc0	$18, CP0_CAUSE /* Cause in $18 */
+
+	LONG_S	k0, PT_R26(sp)
+	LONG_S	k1, PT_R27(sp)
+
+	LONG_S	$28, PT_R28(sp)
+	LONG_S	$18, PT_CAUSE(sp)
+	MFC0	v0, CP0_BADVADDR
+	LONG_S	$30, PT_R30(sp)
+	LONG_S	$31, PT_R31(sp)
+
+	ori	$28, sp, _THREAD_MASK
+	LONG_S	v0, PT_BVADDR(sp)
+	xori	$28, _THREAD_MASK
+
+	mfc0	v0, CP0_GUESTCTL0
+	ins	v0, zero, MIPS_GUESTCTL0B_GM, 1
+	mtc0	v0, CP0_GUESTCTL0
+
+	PTR_L	a0, (VCPU_STACK_OFFSET + KVM_MIPS_VZ_REGS_SIZE)(sp)
+	PTR_L	v0, TI_TASK($28)
+	PTR_L	a0, KVM_VCPU_ARCH_IMPL(a0)
+	lw	v1, KVM_MIPS_VCPU_VZ_MM_ASID(a0)
+	dmtc0	v1, CP0_ENTRYHI
+	LONG_L	v1, TASK_MM(v0)
+
+	jal	tlbmiss_handler_setup_pgd_array
+	 LONG_L	a0, MM_PGD(v1)
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+	/*
+	* The Octeon multiplier state is affected by general
+	* multiply instructions. It must be saved before and
+	* kernel code might corrupt it
+	*/
+	jal     octeon_mult_save
+	 nop
+#endif
+
+	PTR_LA	v1, ebase
+	LONG_L	v1, 0(v1)
+	ori	v1, 1 << 11
+	MTC0	v1, CP0_EBASE
+	beqz	$16, try_general
+	 xori	v1, 1 << 11
+
+chain_to_root:
+	PTR_LA	v0, resume_intercept
+	MTC0	v0, CP0_EPC
+	PTR_ADDU v1, v1, $16
+	jr	v1
+	 nop
+
+try_general:
+	andi	a0, $18, 0x7c
+	beqz	a0, chain_to_root
+	 li	$16, 0x180
+call_handler:
+#ifdef CONFIG_64BIT
+	SLL	a0, 1
+#endif
+	PTR_LA	v0, vz_ex_handlers
+	PTR_ADDU v0, v0, a0
+	PTR_L	v0, 0(v0)
+	ori	$17, ST0_EXL | ST0_IE
+	xori	$17, ST0_EXL | ST0_IE
+	move	a1, sp
+	PTR_L	a0, (VCPU_STACK_OFFSET + KVM_MIPS_VZ_REGS_SIZE)(sp)
+	jalr	v0
+	 mtc0	$17, CP0_STATUS
+resume_intercept:
+	LONG_L	t0, TI_FLAGS($28)
+	ori	$17, ST0_EXL | ST0_IE
+	xori	$17, ST0_EXL
+	andi	t0, (_TIF_NEED_RESCHED | _TIF_SIGPENDING)
+	beqz	t0, resume_intercept0
+	 nop
+	move	a1, sp
+	PTR_L	a0, (VCPU_STACK_OFFSET + KVM_MIPS_VZ_REGS_SIZE)(sp)
+	jal	mipsvz_do_resched
+	 mtc0	$17, CP0_STATUS
+resume_intercept0:
+	LONG_L	v1, PT_STATUS(sp)
+	mtc0	v1, CP0_STATUS
+	PTR_LA	v1, mipsvz_ebase_page
+	LONG_L	v1, 0(v1)
+	ori	v1, 1 << 11
+	MTC0	v1, CP0_EBASE
+
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+	jal	octeon_mult_restore
+	 nop
+#endif
+
+	LONG_L	v1, PT_LO(sp)
+	mtlo	v1
+	LONG_L	v1, PT_HI(sp)
+	mthi	v1
+
+	/* Must set GuestCtl0[GM] */
+	PTR_LI	v0, 1
+	mfc0	v1, CP0_GUESTCTL0
+	PTR_L	a0, (VCPU_STACK_OFFSET + KVM_MIPS_VZ_REGS_SIZE)(sp) /* a0 <- vcpu */
+	ins	v1, v0, MIPS_GUESTCTL0B_GM, 1
+	PTR_L	a1, KVM_VCPU_ARCH_IMPL(a0) /* a1 <- vcpu->arch.impl */
+	mtc0	v1, CP0_GUESTCTL0
+
+	lw	v1, KVM_MIPS_VCPU_VZ_GUEST_ASID(a1)
+	lbu	v0, KVM_MIPS_VCPU_VZ_INJECTED_IPX(a1)
+	dmtc0	v1, CP0_ENTRYHI
+	PTR_L	v1, KVM_VCPU_KVM(a0) /* v1 <- kvm */
+	/* Inject any interrupts that may have been requested. */
+	mfc0	k1, CP0_GUESTCTL2
+	PTR_L	v1, KVM_ARCH_IMPL(v1) /* v1 <- kvm->arch.impl */
+	ins	k1, v0, 8, 8
+	mtc0	k1, CP0_GUESTCTL2
+
+	jal	tlbmiss_handler_setup_pgd_array
+	 LONG_L	a0, KVM_MIPS_VZ_PGD(v1)
+
+	LONG_L	v0, PT_EPC(sp)
+
+	LONG_L	$31, PT_R31(sp)
+	LONG_L	$30, PT_R30(sp)
+	LONG_L	$28, PT_R28(sp)
+	MTC0	v0, CP0_EPC
+	LONG_L	$27, PT_R27(sp)
+	LONG_L	$26, PT_R26(sp)
+	LONG_L	$25, PT_R25(sp)
+	LONG_L	$24, PT_R24(sp)
+	LONG_L	$23, PT_R23(sp)
+	LONG_L	$22, PT_R22(sp)
+	LONG_L	$21, PT_R21(sp)
+	LONG_L	$20, PT_R20(sp)
+	LONG_L	$19, PT_R19(sp)
+	LONG_L	$18, PT_R18(sp)
+	LONG_L	$17, PT_R17(sp)
+	LONG_L	$16, PT_R16(sp)
+	LONG_L	$15, PT_R15(sp)
+	LONG_L	$14, PT_R14(sp)
+	LONG_L	$13, PT_R13(sp)
+	LONG_L	$12, PT_R12(sp)
+	LONG_L	$11, PT_R11(sp)
+	LONG_L	$10, PT_R10(sp)
+	LONG_L	$9, PT_R9(sp)
+	LONG_L	$8, PT_R8(sp)
+	LONG_L	$7, PT_R7(sp)
+	LONG_L	$6, PT_R6(sp)
+	LONG_L	$5, PT_R5(sp)
+	LONG_L	$4, PT_R4(sp)
+	LONG_L	$3, PT_R3(sp)
+	LONG_L	$2, PT_R2(sp)
+	LONG_L	$1, PT_R1(sp)
+	LONG_L	sp, PT_R29(sp)
+#ifdef CONFIG_CAVIUM_ERET_MISPREDICT_WORKAROUND
+	dmtc0	$0, $30, 7		/* force misprediction for ERET */
+#endif
+	eret
+	.set	pop
+	END(mipsvz_common_chain)

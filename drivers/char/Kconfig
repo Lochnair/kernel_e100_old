@@ -579,10 +579,12 @@ config TELCLOCK
 	  controlling the behavior of this hardware.
 
 config DEVPORT
-	bool
-	depends on !M68K
+	bool "/dev/port character device"
 	depends on ISA || PCI
 	default y
+	help
+	  Say Y here if you want to support the /dev/port device. The /dev/port
+	  device is similar to /dev/mem, but for I/O ports.
 
 source "drivers/s390/char/Kconfig"
 
@@ -604,6 +606,19 @@ config TILE_SROM
 	  in /dev/srom/.  The Tilera hypervisor makes the flash
 	  device appear much like a simple EEPROM, and knows
 	  how to partition a single ROM for multiple purposes.
+
+config OCTEON_OCLA
+	tristate "Octeon On Chip Logic Analizer"
+	depends on CAVIUM_OCTEON_SOC
+	default n
+	---help---
+	  This driver provides kernel-side support for the On Chip Logic
+	  Analizer found on Cavium Networks CN70XX and CN78XX SOCs.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called octeon-ocla.
+
+	  If unsure, say N.
 
 endmenu
 

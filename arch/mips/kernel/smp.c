@@ -49,7 +49,7 @@
 
 volatile cpumask_t cpu_callin_map;	/* Bitmask of started secondaries */
 
-int __cpu_number_map[NR_CPUS];		/* Map physical to logical */
+int __cpu_number_map[CONFIG_MIPS_NR_CPU_NR_MAP];		/* Map physical to logical */
 EXPORT_SYMBOL(__cpu_number_map);
 
 int __cpu_logical_map[NR_CPUS];		/* Map logical to physical */
@@ -109,10 +109,10 @@ asmlinkage __cpuinit void start_secondary(void)
 	else
 #endif /* CONFIG_MIPS_MT_SMTC */
 	cpu_probe();
-	cpu_report();
 	per_cpu_trap_init(false);
 	mips_clockevent_init();
 	mp_ops->init_secondary();
+	cpu_report();
 
 	/*
 	 * XXX parity protection should be folded in here when it's converted
@@ -171,10 +171,8 @@ static void stop_this_cpu(void *dummy)
 	 * Remove this CPU:
 	 */
 	set_cpu_online(smp_processor_id(), false);
-	for (;;) {
-		if (cpu_wait)
-			(*cpu_wait)();		/* Wait if available. */
-	}
+	local_irq_disable();
+	while (1);
 }
 
 void smp_send_stop(void)

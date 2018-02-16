@@ -78,7 +78,7 @@ pcibios_align_resource(void *data, const struct resource *res,
 
 static void pcibios_scanbus(struct pci_controller *hose)
 {
-	static int next_busno;
+	int next_busno = 0;
 	static int need_domain_info;
 	LIST_HEAD(resources);
 	struct pci_bus *bus;
@@ -113,7 +113,6 @@ static void pcibios_scanbus(struct pci_controller *hose)
 		if (!pci_has_flag(PCI_PROBE_ONLY)) {
 			pci_bus_size_bridges(bus);
 			pci_bus_assign_resources(bus);
-			pci_enable_bridges(bus);
 		}
 	}
 }

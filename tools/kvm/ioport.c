@@ -55,6 +55,28 @@ static void ioport_remove(struct rb_root *root, struct ioport *data)
 	rb_int_erase(root, &data->node);
 }
 
+#ifdef CONFIG_HAS_LIBFDT
+static void generate_ioport_fdt_node(void *fdt,
+				     struct device_header *dev_hdr,
+				     void (*generate_irq_prop)(void *fdt,
+							       u8 irq))
+{
+	struct ioport *ioport = container_of(dev_hdr, struct ioport, dev_hdr);
+	struct ioport_operations *ops = ioport->ops;
+
+	if (ops->generate_fdt_node)
+		ops->generate_fdt_node(ioport, fdt, generate_irq_prop);
+}
+#else
+static void generate_ioport_fdt_node(void *fdt,
+				     struct device_header *dev_hdr,
+				     void (*generate_irq_prop)(void *fdt,
+							       u8 irq))
+{
+	die("Unable to generate device tree nodes without libfdt\n");
+}
+#endif
+
 int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, int count, void *param)
 {
 	struct ioport *entry;
@@ -75,9 +97,13 @@ int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, i
 		return -ENOMEM;
 
 	*entry = (struct ioport) {
-		.node	= RB_INT_INIT(port, port + count),
-		.ops	= ops,
-		.priv	= param,
+		.node		= RB_INT_INIT(port, port + count),
+		.ops		= ops,
+		.priv		= param,
+		.dev_hdr	= (struct device_header) {
+			.bus_type	= DEVICE_BUS_IOPORT,
+			.data		= generate_ioport_fdt_node,
+		},
 	};
 
 	r = ioport_insert(&ioport_tree, entry);
@@ -86,6 +112,8 @@ int ioport__register(struct kvm *kvm, u16 port, struct ioport_operations *ops, i
 		br_write_unlock(kvm);
 		return r;
 	}
+
+	device__register(&entry->dev_hdr);
 	br_write_unlock(kvm);
 
 	return port;
@@ -144,12 +172,13 @@ static void ioport_error(u16 port, void *data, int direction, int size, u32 coun
 	fprintf(stderr, "IO error: %s port=%x, size=%d, count=%u\n", to_direction(direction), port, size, count);
 }
 
-bool kvm__emulate_io(struct kvm *kvm, u16 port, void *data, int direction, int size, u32 count)
+bool kvm__emulate_io(struct kvm_cpu *vcpu, u16 port, void *data, int direction, int size, u32 count)
 {
 	struct ioport_operations *ops;
 	bool ret = false;
 	struct ioport *entry;
 	void *ptr = data;
+	struct kvm *kvm = vcpu->kvm;
 
 	br_read_lock();
 	entry = ioport_search(&ioport_tree, port);
@@ -160,9 +189,9 @@ bool kvm__emulate_io(struct kvm *kvm, u16 port, void *data, int direction, int s
 
 	while (count--) {
 		if (direction == KVM_EXIT_IO_IN && ops->io_in)
-				ret = ops->io_in(entry, kvm, port, ptr, size);
+				ret = ops->io_in(entry, vcpu, port, ptr, size);
 		else if (ops->io_out)
-				ret = ops->io_out(entry, kvm, port, ptr, size);
+				ret = ops->io_out(entry, vcpu, port, ptr, size);
 
 		ptr += size;
 	}

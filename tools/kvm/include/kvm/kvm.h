@@ -83,11 +83,11 @@ int kvm_timer__init(struct kvm *kvm);
 int kvm_timer__exit(struct kvm *kvm);
 void kvm__irq_line(struct kvm *kvm, int irq, int level);
 void kvm__irq_trigger(struct kvm *kvm, int irq);
-bool kvm__emulate_io(struct kvm *kvm, u16 port, void *data, int direction, int size, u32 count);
-bool kvm__emulate_mmio(struct kvm *kvm, u64 phys_addr, u8 *data, u32 len, u8 is_write);
+bool kvm__emulate_io(struct kvm_cpu *vcpu, u16 port, void *data, int direction, int size, u32 count);
+bool kvm__emulate_mmio(struct kvm_cpu *vcpu, u64 phys_addr, u8 *data, u32 len, u8 is_write);
 int kvm__register_mem(struct kvm *kvm, u64 guest_phys, u64 size, void *userspace_addr);
 int kvm__register_mmio(struct kvm *kvm, u64 phys_addr, u64 phys_addr_len, bool coalesce,
-			void (*mmio_fn)(u64 addr, u8 *data, u32 len, u8 is_write, void *ptr),
+		       void (*mmio_fn)(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len, u8 is_write, void *ptr),
 			void *ptr);
 bool kvm__deregister_mmio(struct kvm *kvm, u64 phys_addr);
 void kvm__pause(struct kvm *kvm);
@@ -103,7 +103,7 @@ void kvm__arch_delete_ram(struct kvm *kvm);
 int kvm__arch_setup_firmware(struct kvm *kvm);
 int kvm__arch_free_firmware(struct kvm *kvm);
 bool kvm__arch_cpu_supports_vm(void);
-void kvm__arch_periodic_poll(struct kvm *kvm);
+void kvm__arch_read_term(struct kvm *kvm);
 
 void *guest_flat_to_host(struct kvm *kvm, u64 offset);
 u64 host_to_guest_flat(struct kvm *kvm, void *ptr);

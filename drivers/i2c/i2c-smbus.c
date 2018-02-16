@@ -28,6 +28,7 @@
 #include <linux/i2c.h>
 #include <linux/i2c-smbus.h>
 #include <linux/slab.h>
+#include <linux/ctype.h>
 
 struct i2c_smbus_alert {
 	unsigned int		alert_edge_triggered:1;
@@ -78,34 +79,36 @@ static void smbus_alert(struct work_struct *work)
 {
 	struct i2c_smbus_alert *alert;
 	struct i2c_client *ara;
-	unsigned short prev_addr = 0;	/* Not a valid address */
+	s32 status;
 
 	alert = container_of(work, struct i2c_smbus_alert, alert);
 	ara = alert->ara;
 
-	for (;;) {
-		s32 status;
+	/*
+	 * Devices with pending alerts reply in address order, low
+	 * to high, because of slave transmit arbitration.  After
+	 * responding, an SMBus device stops asserting SMBALERT#.
+	 *
+	 * Note that SMBus 2.0 reserves 10-bit addresess for future
+	 * use.  We neither handle them, nor try to use PEC here.
+	 */
+	status = i2c_smbus_read_byte(ara);
+	while (status >= 0) {
 		struct alert_data data;
-
-		/*
-		 * Devices with pending alerts reply in address order, low
-		 * to high, because of slave transmit arbitration.  After
-		 * responding, an SMBus device stops asserting SMBALERT#.
-		 *
-		 * Note that SMBus 2.0 reserves 10-bit addresess for future
-		 * use.  We neither handle them, nor try to use PEC here.
-		 */
-		status = i2c_smbus_read_byte(ara);
-		if (status < 0)
-			break;
 
 		data.flag = status & 1;
 		data.addr = status >> 1;
 
-		if (data.addr == prev_addr) {
+		status = i2c_smbus_read_byte(ara);
+
+		/*
+		 * Check for duplicates before calling the handler, the
+		 * handler may cause the same alert to be sent.
+		 */
+		if (status >= 0 && data.addr == status >> 1) {
 			dev_warn(&ara->dev, "Duplicate SMBALERT# from dev "
 				"0x%02x, skipping\n", data.addr);
-			break;
+			status = -1;
 		}
 		dev_dbg(&ara->dev, "SMBALERT# from dev 0x%02x, flag %d\n",
 			data.addr, data.flag);
@@ -113,7 +116,6 @@ static void smbus_alert(struct work_struct *work)
 		/* Notify driver for the device which issued the alert */
 		device_for_each_child(&ara->adapter->dev, &data,
 				      smbus_do_alert);
-		prev_addr = data.addr;
 	}
 
 	/* We handled all alerts; re-enable level-triggered IRQs */
@@ -133,14 +135,84 @@ static irqreturn_t smbalert_irq(int irq, void *d)
 	return IRQ_HANDLED;
 }
 
+static struct i2c_smbus_alert_setup *smbalert_parse_parms(struct device *dev,
+		const char *parms,
+		struct i2c_smbus_alert_setup *data)
+{
+	int rv;
+	char end;
+
+	if (!parms)
+		return NULL;
+
+	while (*parms) {
+		const char *next = parms;
+		const char *val;
+		int parmlen;
+
+		while (*next && !isspace(*next) && *next != '=')
+			next++;
+
+		parmlen = next - parms;
+
+		if (*next == '=') {
+			next++;
+			val = next;
+			while (*next && !isspace(*next))
+				next++;
+		} else {
+			val = NULL;
+		}
+
+		if (strncmp(parms, "irq", parmlen) == 0) {
+			if (!val) {
+				dev_err(dev, "no irq parm value given\n");
+				return NULL;
+			}
+			rv = sscanf(val, "%d%c", &data->irq, &end);
+			if ((rv < 1) || ((rv > 1) && !isspace(end))) {
+				dev_err(dev, "Invalid irq parm: %s\n", val);
+				return NULL;
+			}
+		} else if (strncmp(parms, "edge", parmlen) == 0) {
+			if (val) {
+				dev_err(dev, "Value given with edge parm: %s\n",
+					val);
+				return NULL;
+			}
+			data->alert_edge_triggered = true;
+		} else {
+			dev_err(dev, "Invalid parameter: %s\n", parms);
+			return NULL;
+		}
+
+		while (*next && isspace(*next))
+			next++;
+		parms = next;
+	}
+
+	return data;
+}
+
 /* Setup SMBALERT# infrastructure */
 static int smbalert_probe(struct i2c_client *ara,
 			  const struct i2c_device_id *id)
 {
 	struct i2c_smbus_alert_setup *setup = ara->dev.platform_data;
+	struct i2c_smbus_alert_setup dummy_setup;
 	struct i2c_smbus_alert *alert;
 	struct i2c_adapter *adapter = ara->adapter;
 	int res;
+
+	if (ara->parms)
+		/* Came in through sysfs. */
+		setup = smbalert_parse_parms(&ara->dev, ara->parms,
+					     &dummy_setup);
+
+	if (!setup) {
+		dev_err(&ara->dev, "SMBus alert without setup\n");
+		return -ENODEV;
+	}
 
 	alert = devm_kzalloc(&ara->dev, sizeof(struct i2c_smbus_alert),
 			     GFP_KERNEL);

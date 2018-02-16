@@ -242,13 +242,15 @@ static ssize_t store_drivers_probe(struct bus_type *bus,
 				   const char *buf, size_t count)
 {
 	struct device *dev;
+	int err = -EINVAL;
 
 	dev = bus_find_device_by_name(bus, NULL, buf);
 	if (!dev)
 		return -ENODEV;
-	if (bus_rescan_devices_helper(dev, NULL) != 0)
-		return -EINVAL;
-	return count;
+	if (bus_rescan_devices_helper(dev, NULL) == 0)
+		err = count;
+	put_device(dev);
+	return err;
 }
 
 static struct device *next_device(struct klist_iter *i)
@@ -870,6 +872,18 @@ static void bus_remove_attrs(struct bus_type *bus)
 	}
 }
 
+static int bus_add_groups(struct bus_type *bus,
+			  const struct attribute_group **groups)
+{
+	return sysfs_create_groups(&bus->p->subsys.kobj, groups);
+}
+
+static void bus_remove_groups(struct bus_type *bus,
+			      const struct attribute_group **groups)
+{
+	sysfs_remove_groups(&bus->p->subsys.kobj, groups);
+}
+
 static void klist_devices_get(struct klist_node *n)
 {
 	struct device_private *dev_prv = to_device_private_bus(n);
@@ -962,10 +976,15 @@ int bus_register(struct bus_type *bus)
 	retval = bus_add_attrs(bus);
 	if (retval)
 		goto bus_attrs_fail;
+	retval = bus_add_groups(bus, bus->bus_groups);
+	if (retval)
+		goto bus_groups_fail;
 
 	pr_debug("bus: '%s': registered\n", bus->name);
 	return 0;
 
+bus_groups_fail:
+	bus_remove_attrs(bus);
 bus_attrs_fail:
 	remove_probe_files(bus);
 bus_probe_files_fail:
@@ -996,6 +1015,7 @@ void bus_unregister(struct bus_type *bus)
 	if (bus->dev_root)
 		device_unregister(bus->dev_root);
 	bus_remove_attrs(bus);
+	bus_remove_groups(bus, bus->bus_groups);
 	remove_probe_files(bus);
 	kset_unregister(bus->p->drivers_kset);
 	kset_unregister(bus->p->devices_kset);

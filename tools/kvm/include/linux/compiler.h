@@ -17,4 +17,8 @@
 #define __must_check
 #define unlikely
 
+#ifndef __intentional_overflow
+# define __intentional_overflow(...)
+#endif
+
 #endif

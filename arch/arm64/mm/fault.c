@@ -36,6 +36,10 @@
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 
+#ifdef CONFIG_PAX_PAGEEXEC
+#include <asm/esr.h>
+#endif
+
 static const char *fault_name(unsigned int esr);
 
 /*
@@ -122,6 +126,13 @@ static void __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		show_regs(regs);
 	}
 
+#ifdef CONFIG_PAX_PAGEEXEC
+	if (esr & ESR_EL0_ISS_IABT) {
+		pax_report_fault(regs, (void *)regs->pc, (void *)regs->sp);
+		do_group_exit(SIGKILL);
+	}
+#endif
+
 	tsk->thread.fault_address = addr;
 	si.si_signo = sig;
 	si.si_errno = 0;
@@ -199,13 +210,6 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	unsigned long vm_flags = VM_READ | VM_WRITE | VM_EXEC;
 	unsigned int mm_flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
-	if (esr & ESR_LNX_EXEC) {
-		vm_flags = VM_EXEC;
-	} else if ((esr & ESR_WRITE) && !(esr & ESR_CM)) {
-		vm_flags = VM_WRITE;
-		mm_flags |= FAULT_FLAG_WRITE;
-	}
-
 	tsk = current;
 	mm  = tsk->mm;
 
@@ -219,6 +223,16 @@ static int __kprobes do_page_fault(unsigned long addr, unsigned int esr,
 	 */
 	if (!mm || pagefault_disabled())
 		goto no_context;
+
+	if (user_mode(regs))
+		mm_flags |= FAULT_FLAG_USER;
+
+	if (esr & ESR_LNX_EXEC) {
+		vm_flags = VM_EXEC;
+	} else if ((esr & ESR_WRITE) && !(esr & ESR_CM)) {
+		vm_flags = VM_WRITE;
+		mm_flags |= FAULT_FLAG_WRITE;
+	}
 
 	/*
 	 * As per x86, we may deadlock here. However, since the kernel only
@@ -275,6 +289,7 @@ retry:
 			 * starvation.
 			 */
 			mm_flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			mm_flags |= FAULT_FLAG_TRIED;
 			goto retry;
 		}
 	}
@@ -288,6 +303,13 @@ retry:
 			      VM_FAULT_BADACCESS))))
 		return 0;
 
+	/*
+	 * If we are in kernel mode at this point, we have no context to
+	 * handle this fault with.
+	 */
+	if (!user_mode(regs))
+		goto no_context;
+
 	if (fault & VM_FAULT_OOM) {
 		/*
 		 * We ran out of memory, call the OOM killer, and return to
@@ -297,13 +319,6 @@ retry:
 		pagefault_out_of_memory();
 		return 0;
 	}
-
-	/*
-	 * If we are in kernel mode at this point, we have no context to
-	 * handle this fault with.
-	 */
-	if (!user_mode(regs))
-		goto no_context;
 
 	if (fault & VM_FAULT_SIGBUS) {
 		/*
@@ -329,6 +344,33 @@ no_context:
 	__do_kernel_fault(mm, addr, esr, regs);
 	return 0;
 }
+
+#ifdef CONFIG_PAX_PAGEEXEC
+void pax_report_insns(struct pt_regs *regs, void *pc, void *sp)
+{
+	long i;
+
+	printk(KERN_ERR "PAX: bytes at PC: ");
+	for (i = 0; i < 20; i++) {
+		unsigned char c;
+		if (get_user(c, (__force unsigned char __user *)pc+i))
+			printk(KERN_CONT "?? ");
+		else
+			printk(KERN_CONT "%02x ", c);
+	}
+	printk("\n");
+
+	printk(KERN_ERR "PAX: bytes at SP-4: ");
+	for (i = -1; i < 20; i++) {
+		unsigned long c;
+		if (get_user(c, (__force unsigned long __user *)sp+i))
+			printk(KERN_CONT "???????? ");
+		else
+			printk(KERN_CONT "%08lx ", c);
+	}
+	printk("\n");
+}
+#endif
 
 /*
  * First Level Translation Fault Handler

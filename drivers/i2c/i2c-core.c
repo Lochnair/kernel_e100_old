@@ -43,6 +43,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/acpi.h>
 #include <asm/uaccess.h>
+#include <linux/ctype.h>
 
 #include "i2c-core.h"
 
@@ -208,6 +209,7 @@ int i2c_generic_scl_recovery(struct i2c_adapter *adap)
 	adap->bus_recovery_info->set_scl(adap, 1);
 	return i2c_generic_recovery(adap);
 }
+EXPORT_SYMBOL_GPL(i2c_generic_scl_recovery);
 
 int i2c_generic_gpio_recovery(struct i2c_adapter *adap)
 {
@@ -222,6 +224,7 @@ int i2c_generic_gpio_recovery(struct i2c_adapter *adap)
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(i2c_generic_gpio_recovery);
 
 int i2c_recover_bus(struct i2c_adapter *adap)
 {
@@ -231,6 +234,7 @@ int i2c_recover_bus(struct i2c_adapter *adap)
 	dev_dbg(&adap->dev, "Trying i2c bus recovery\n");
 	return adap->bus_recovery_info->recover_bus(adap);
 }
+EXPORT_SYMBOL_GPL(i2c_recover_bus);
 
 static int i2c_device_probe(struct device *dev)
 {
@@ -391,7 +395,10 @@ static int i2c_device_pm_restore(struct device *dev)
 
 static void i2c_client_dev_release(struct device *dev)
 {
-	kfree(to_i2c_client(dev));
+	struct i2c_client *client = to_i2c_client(dev);
+
+	kfree(client->parms);
+	kfree(client);
 }
 
 static ssize_t
@@ -647,6 +654,13 @@ i2c_new_device(struct i2c_adapter *adap, struct i2c_board_info const *info)
 	client->flags = info->flags;
 	client->addr = info->addr;
 	client->irq = info->irq;
+	if (info->parms) {
+		client->parms = kstrdup(info->parms, GFP_KERNEL);
+		if (!client->parms) {
+			dev_err(&adap->dev, "Out of memory allocating parms\n");
+			goto out_err_silent;
+		}
+	}
 
 	strlcpy(client->name, info->type, sizeof(client->name));
 
@@ -798,31 +812,43 @@ i2c_sysfs_new_device(struct device *dev, struct device_attribute *attr,
 	struct i2c_adapter *adap = to_i2c_adapter(dev);
 	struct i2c_board_info info;
 	struct i2c_client *client;
-	char *blank, end;
+	char *pos, end;
 	int res;
 
 	memset(&info, 0, sizeof(struct i2c_board_info));
 
-	blank = strchr(buf, ' ');
-	if (!blank) {
+	pos = strpbrk(buf, " \t");
+	if (!pos) {
 		dev_err(dev, "%s: Missing parameters\n", "new_device");
 		return -EINVAL;
 	}
-	if (blank - buf > I2C_NAME_SIZE - 1) {
+	if (pos - buf > I2C_NAME_SIZE - 1) {
 		dev_err(dev, "%s: Invalid device name\n", "new_device");
 		return -EINVAL;
 	}
-	memcpy(info.type, buf, blank - buf);
+	memcpy(info.type, buf, pos - buf);
 
-	/* Parse remaining parameters, reject extra parameters */
-	res = sscanf(++blank, "%hi%c", &info.addr, &end);
-	if (res < 1) {
+	while (isspace(*pos))
+		pos++;
+
+	/* Parse address, saving remaining parameters. */
+	res = sscanf(pos, "%hi%c", &info.addr, &end);
+	if (res < 1 || !isspace(end)) {
 		dev_err(dev, "%s: Can't parse I2C address\n", "new_device");
 		return -EINVAL;
 	}
-	if (res > 1  && end != '\n') {
-		dev_err(dev, "%s: Extra parameters\n", "new_device");
-		return -EINVAL;
+	if (res > 1 && end != '\n') {
+		if (isspace(end)) {
+			/* Extra parms, skip the address and space. */
+			while (!isspace(*pos))
+				pos++;
+			while (isspace(*pos))
+				pos++;
+			info.parms = pos;
+		} else {
+			dev_err(dev, "%s: Extra parameters\n", "new_device");
+			return -EINVAL;
+		}
 	}
 
 	client = i2c_new_device(adap, &info);
@@ -1329,6 +1355,7 @@ int i2c_register_driver(struct module *owner, struct i2c_driver *driver)
 	/* add the driver to the list of i2c drivers in the driver core */
 	driver->driver.owner = owner;
 	driver->driver.bus = &i2c_bus_type;
+	INIT_LIST_HEAD(&driver->clients);
 
 	/* When registration returns, the driver core
 	 * will have called probe() for all matching-but-unbound devices.
@@ -1347,7 +1374,6 @@ int i2c_register_driver(struct module *owner, struct i2c_driver *driver)
 
 	pr_debug("i2c-core: driver [%s] registered\n", driver->driver.name);
 
-	INIT_LIST_HEAD(&driver->clients);
 	/* Walk the adapters that are already present */
 	i2c_for_each_dev(driver, __process_new_driver);
 
@@ -1583,7 +1609,6 @@ static void i2c_init_entry(struct i2c_adapter *adap,
 	entry->end_jiffies = jiffies + adap->timeout;
 	entry->tries = 0;
 	kref_init(&entry->usecount);
-	entry->handler = NULL;
 }
 
 static void i2c_wait_done(struct i2c_op_q_entry *entry)
@@ -1610,10 +1635,11 @@ static void i2c_perform_op_wait(struct i2c_adapter *adap,
 			entry->result = ret;
 			list_del(&entry->link);
 		}
-		spin_unlock_irqrestore(&adap->q_lock, flags);
 	}
 
-	if (!entry->result)
+	spin_unlock_irqrestore(&adap->q_lock, flags);
+
+	if (!ret)
 		wait_for_completion(&entry->done);
 }
 
@@ -1701,6 +1727,7 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	entry->i2c.msgs = msgs;
 	entry->i2c.num = num;
 	entry->complete = NULL;
+	entry->handler = NULL;
 
 	i2c_transfer_entry(adap, entry);
 	rv = entry->result;
@@ -2468,6 +2495,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	entry->smbus.size = protocol;
 	entry->smbus.data = data;
 	entry->complete = NULL;
+	entry->handler = NULL;
 	i2c_init_entry(adapter, entry);
 	entry->result = -EOPNOTSUPP;
 
@@ -2493,7 +2521,7 @@ s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags,
 	}
 
 	if (entry->result != -EOPNOTSUPP ||
-					!adapter->algo->master_xfer) {
+	    (!adapter->algo->master_xfer && !adapter->algo->master_start)) {
 		if (entry->complete)
 			entry->complete(adapter, entry);
 		goto out;
@@ -2607,10 +2635,10 @@ void i2c_op_done(struct i2c_adapter *adap, struct i2c_op_q_entry *entry)
 		}
 	}
 
+next_entry:
 	entry->state = I2C_OP_FINISHED;
 	list_del(&entry->link);
 
-next_entry:
 	spin_unlock_irqrestore(&adap->q_lock, flags);
 
 	if (entry->complete)

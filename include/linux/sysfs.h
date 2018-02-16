@@ -93,6 +93,15 @@ typedef struct attribute_group __no_const attribute_group_no_const;
 #define __ATTR_IGNORE_LOCKDEP	__ATTR
 #endif
 
+#define ATTRIBUTE_GROUPS(name)					\
+static const struct attribute_group name##_group = {		\
+	.attrs = name##_attrs,					\
+};								\
+static const struct attribute_group *name##_groups[] = {	\
+	&name##_group,						\
+	NULL,							\
+}
+
 #define attr_name(_attr) (_attr).attr.name
 
 struct file;
@@ -171,10 +180,14 @@ void sysfs_delete_link(struct kobject *dir, struct kobject *targ,
 
 int __must_check sysfs_create_group(struct kobject *kobj,
 				    const struct attribute_group *grp);
+int __must_check sysfs_create_groups(struct kobject *kobj,
+				     const struct attribute_group **groups);
 int sysfs_update_group(struct kobject *kobj,
 		       const struct attribute_group *grp);
 void sysfs_remove_group(struct kobject *kobj,
 			const struct attribute_group *grp);
+void sysfs_remove_groups(struct kobject *kobj,
+			 const struct attribute_group **groups);
 int sysfs_add_file_to_group(struct kobject *kobj,
 			const struct attribute *attr, const char *group);
 void sysfs_remove_file_from_group(struct kobject *kobj,

@@ -37,6 +37,7 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 {
 	struct kvm_cpu *vcpu;
 	int mmap_size;
+	int coalesced_offset;
 
 	vcpu = kvm_cpu__new(kvm);
 	if (!vcpu)
@@ -58,6 +59,10 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 
 	vcpu->is_running = true;
 
+	coalesced_offset = ioctl(kvm->sys_fd, KVM_CHECK_EXTENSION, KVM_CAP_COALESCED_MMIO);
+	if (coalesced_offset)
+		vcpu->ring = (void *)vcpu->kvm_run + (coalesced_offset * PAGE_SIZE);
+
 	return vcpu;
 }
 
@@ -76,7 +81,7 @@ static void kvm_cpu__setup_regs(struct kvm_cpu *vcpu)
 
 
 	one_reg.id = KVM_REG_MIPS | KVM_REG_SIZE_U32 | (0x10000 + 8 * 12 + 0); /* Status */
-	one_reg.addr = (uint32_t *)&v;
+	one_reg.addr = (unsigned long)(uint32_t *)&v;
 	v = 6;
 
 	if (ioctl(vcpu->vcpu_fd, KVM_SET_ONE_REG, &one_reg) < 0)
@@ -98,23 +103,24 @@ static bool kvm_cpu__hypercall_write_cons(struct kvm_cpu *vcpu)
 	int len = (int)vcpu->kvm_run->hypercall.args[2];
 	char *host_addr;
 
-	if (term < 0 || term >= KVM_NUM_TERM) {
+	if (term < 0 || term >= TERM_MAX_DEVS) {
 		pr_warning("hypercall_write_cons term out of range <%d>", term);
 		return false;
 	}
-	if (len <= 0) {
-		pr_warning("hypercall_write_cons len out of range <%d>", len);
-		return false;
-	}
 
-	if ((addr & 0xffffffffc0000000ul) == 0xffffffff80000000ul)
+	if ((addr & 0xffffffffc0000000ull) == 0xffffffff80000000ull)
 		addr &= 0x1ffffffful; /* Convert KSEG{0,1} to physical. */
-	if ((addr & 0xc000000000000000ul) == 0x8000000000000000ul)
-		addr &= 0x07fffffffffffffful; /* Convert XKPHYS to pysical */
+	if ((addr & 0xc000000000000000ull) == 0x8000000000000000ull)
+		addr &= 0x07ffffffffffffffull; /* Convert XKPHYS to pysical */
 
 	host_addr = guest_flat_to_host(vcpu->kvm, addr);
 	if (!host_addr) {
 		pr_warning("hypercall_write_cons unmapped physaddr %llx", (unsigned long long)addr);
+		return false;
+	}
+
+	if ((len <= 0) || !host_ptr_in_ram(vcpu->kvm, host_addr + len)) {
+		pr_warning("hypercall_write_cons len out of range <%d>", len);
 		return false;
 	}
 
@@ -123,11 +129,12 @@ static bool kvm_cpu__hypercall_write_cons(struct kvm_cpu *vcpu)
 	return true;
 }
 
+#define KVM_HC_MIPS_CONSOLE_OUTPUT 8
 bool kvm_cpu__handle_exit(struct kvm_cpu *vcpu)
 {
 	switch(vcpu->kvm_run->exit_reason) {
 	case KVM_EXIT_HYPERCALL:
-		if (vcpu->kvm_run->hypercall.nr == 0) {
+		if (vcpu->kvm_run->hypercall.nr == KVM_HC_MIPS_CONSOLE_OUTPUT) {
 			return kvm_cpu__hypercall_write_cons(vcpu);
 		} else {
 			pr_warning("KVM_EXIT_HYPERCALL unrecognized call %llu",
@@ -155,34 +162,50 @@ void kvm_cpu__show_registers(struct kvm_cpu *vcpu)
 		die("KVM_GET_REGS failed");
 	dprintf(debug_fd, "\n Registers:\n");
 	dprintf(debug_fd,   " ----------\n");
-	dprintf(debug_fd, "$0   : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[0], (unsigned long)regs.gpr[1],
-		(unsigned long)regs.gpr[2], (unsigned long)regs.gpr[3]);
-	dprintf(debug_fd, "$4   : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[4], (unsigned long)regs.gpr[5],
-		(unsigned long)regs.gpr[6], (unsigned long)regs.gpr[7]);
-	dprintf(debug_fd, "$8   : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[8], (unsigned long)regs.gpr[9],
-		(unsigned long)regs.gpr[10], (unsigned long)regs.gpr[11]);
-	dprintf(debug_fd, "$12  : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[12], (unsigned long)regs.gpr[13],
-		(unsigned long)regs.gpr[14], (unsigned long)regs.gpr[15]);
-	dprintf(debug_fd, "$16  : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[16], (unsigned long)regs.gpr[17],
-		(unsigned long)regs.gpr[18], (unsigned long)regs.gpr[19]);
-	dprintf(debug_fd, "$20  : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[20], (unsigned long)regs.gpr[21],
-		(unsigned long)regs.gpr[22], (unsigned long)regs.gpr[23]);
-	dprintf(debug_fd, "$24  : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[24], (unsigned long)regs.gpr[25],
-		(unsigned long)regs.gpr[26], (unsigned long)regs.gpr[27]);
-	dprintf(debug_fd, "$28  : %016lx %016lx %016lx %016lx\n",
-		(unsigned long)regs.gpr[28], (unsigned long)regs.gpr[29],
-		(unsigned long)regs.gpr[30], (unsigned long)regs.gpr[31]);
+	dprintf(debug_fd, "$0   : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[0],
+		(unsigned long long)regs.gpr[1],
+		(unsigned long long)regs.gpr[2],
+		(unsigned long long)regs.gpr[3]);
+	dprintf(debug_fd, "$4   : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[4],
+		(unsigned long long)regs.gpr[5],
+		(unsigned long long)regs.gpr[6],
+		(unsigned long long)regs.gpr[7]);
+	dprintf(debug_fd, "$8   : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[8],
+		(unsigned long long)regs.gpr[9],
+		(unsigned long long)regs.gpr[10],
+		(unsigned long long)regs.gpr[11]);
+	dprintf(debug_fd, "$12  : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[12],
+		(unsigned long long)regs.gpr[13],
+		(unsigned long long)regs.gpr[14],
+		(unsigned long long)regs.gpr[15]);
+	dprintf(debug_fd, "$16  : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[16],
+		(unsigned long long)regs.gpr[17],
+		(unsigned long long)regs.gpr[18],
+		(unsigned long long)regs.gpr[19]);
+	dprintf(debug_fd, "$20  : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[20],
+		(unsigned long long)regs.gpr[21],
+		(unsigned long long)regs.gpr[22],
+		(unsigned long long)regs.gpr[23]);
+	dprintf(debug_fd, "$24  : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[24],
+		(unsigned long long)regs.gpr[25],
+		(unsigned long long)regs.gpr[26],
+		(unsigned long long)regs.gpr[27]);
+	dprintf(debug_fd, "$28  : %016llx %016llx %016llx %016llx\n",
+		(unsigned long long)regs.gpr[28],
+		(unsigned long long)regs.gpr[29],
+		(unsigned long long)regs.gpr[30],
+		(unsigned long long)regs.gpr[31]);
 
-	dprintf(debug_fd, "hi   : %016lx\n", regs.hi);
-	dprintf(debug_fd, "lo   : %016lx\n", regs.lo);
-	dprintf(debug_fd, "epc  : %016lx\n", regs.pc);
+	dprintf(debug_fd, "hi   : %016llx\n", (unsigned long long)regs.hi);
+	dprintf(debug_fd, "lo   : %016llx\n", (unsigned long long)regs.lo);
+	dprintf(debug_fd, "epc  : %016llx\n", (unsigned long long)regs.pc);
 
 	dprintf(debug_fd, "\n");
 }

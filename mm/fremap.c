@@ -207,18 +207,31 @@ get_write_lock:
 		 */
 		if (mapping_cap_account_dirty(mapping)) {
 			unsigned long addr;
-			struct file *file = get_file(vma->vm_file);
+			struct file *file = vma->vm_file,
+				*prfile = vma->vm_prfile;
 
-			addr = mmap_region(file, start, size,
-					vma->vm_flags, pgoff);
-			fput(file);
+			/* mmap_region may free vma; grab the info now */
+			vm_flags = vma->vm_flags;
+
+			vma_get_file(vma);
+			addr = mmap_region(file, start, size, vm_flags, pgoff);
+			vma_fput(vma);
 			if (IS_ERR_VALUE(addr)) {
 				err = addr;
 			} else {
 				BUG_ON(addr != start);
+				if (prfile) {
+					struct vm_area_struct *new_vma;
+
+					new_vma = find_vma(mm, addr);
+					if (!new_vma->vm_prfile)
+						new_vma->vm_prfile = prfile;
+					if (new_vma != vma)
+						get_file(prfile);
+				}
 				err = 0;
 			}
-			goto out;
+			goto out_freed;
 		}
 		mutex_lock(&mapping->i_mmap_mutex);
 		flush_dcache_mmap_lock(mapping);
@@ -253,6 +266,7 @@ get_write_lock:
 out:
 	if (vma)
 		vm_flags = vma->vm_flags;
+out_freed:
 	if (likely(!has_write_lock))
 		up_read(&mm->mmap_sem);
 	else

@@ -3,6 +3,7 @@
 #include "kvm/symbol.h"
 #include "kvm/util.h"
 #include "kvm/kvm.h"
+#include "kvm/virtio.h"
 
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -13,6 +14,11 @@
 #include <stdio.h>
 
 extern __thread struct kvm_cpu *current_kvm_cpu;
+
+int __attribute__((weak)) kvm_cpu__get_endianness(struct kvm_cpu *vcpu)
+{
+	return VIRTIO_ENDIAN_HOST;
+}
 
 void kvm_cpu__enable_singlestep(struct kvm_cpu *vcpu)
 {
@@ -54,7 +60,7 @@ static void kvm_cpu__handle_coalesced_mmio(struct kvm_cpu *cpu)
 		while (cpu->ring->first != cpu->ring->last) {
 			struct kvm_coalesced_mmio *m;
 			m = &cpu->ring->coalesced_mmio[cpu->ring->first];
-			kvm_cpu__emulate_mmio(cpu->kvm,
+			kvm_cpu__emulate_mmio(cpu,
 					      m->phys_addr,
 					      m->data,
 					      m->len,
@@ -117,7 +123,7 @@ int kvm_cpu__start(struct kvm_cpu *cpu)
 		case KVM_EXIT_IO: {
 			bool ret;
 
-			ret = kvm_cpu__emulate_io(cpu->kvm,
+			ret = kvm_cpu__emulate_io(cpu,
 						  cpu->kvm_run->io.port,
 						  (u8 *)cpu->kvm_run +
 						  cpu->kvm_run->io.data_offset,
@@ -138,7 +144,7 @@ int kvm_cpu__start(struct kvm_cpu *cpu)
 			 */
 			kvm_cpu__handle_coalesced_mmio(cpu);
 
-			ret = kvm_cpu__emulate_mmio(cpu->kvm,
+			ret = kvm_cpu__emulate_mmio(cpu,
 						    cpu->kvm_run->mmio.phys_addr,
 						    cpu->kvm_run->mmio.data,
 						    cpu->kvm_run->mmio.len,

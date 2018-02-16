@@ -51,7 +51,7 @@ extern unsigned int vced_count, vcei_count;
  * User space process size: 2GB. This is hardcoded into a few places,
  * so don't change it unless you know what you are doing.
  */
-#define TASK_SIZE	0x7fff8000UL
+#define TASK_SIZE	0x80000000UL
 #endif
 
 #define STACK_TOP_MAX	TASK_SIZE
@@ -197,7 +197,7 @@ struct octeon_cop2_state {
 #define INIT_OCTEON_COP2 {0,}
 
 struct octeon_cvmseg_state {
-	unsigned long cvmseg[CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE]
+	unsigned long cvmseg[CONFIG_CAVIUM_OCTEON_EXTRA_CVMSEG + 3]
 			    [cpu_dcache_line_size() / sizeof(unsigned long)];
 };
 
@@ -243,11 +243,6 @@ struct thread_struct {
 	unsigned long cp0_badvaddr;	/* Last user fault */
 	unsigned long cp0_baduaddr;	/* Last kernel fault accessing USEG */
 	unsigned long error_code;
-#ifdef CONFIG_KVM_MIPS_VZ
-	struct kvm_vcpu *vcpu;
-	unsigned int mm_asid;
-	unsigned int guest_asid;
-#endif
 #ifdef CONFIG_CPU_CAVIUM_OCTEON
 	struct octeon_cop2_state cp2;
 	struct octeon_cvmseg_state cvmseg;

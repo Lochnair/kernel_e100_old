@@ -112,6 +112,7 @@ void kvm_run_set_wrapper_sandbox(void)
 	OPT_BOOLEAN('\0', "balloon", &(cfg)->balloon, "Enable virtio"	\
 			" balloon"),					\
 	OPT_BOOLEAN('\0', "vnc", &(cfg)->vnc, "Enable VNC framebuffer"),\
+	OPT_BOOLEAN('\0', "gtk", &(cfg)->gtk, "Enable GTK framebuffer"),\
 	OPT_BOOLEAN('\0', "sdl", &(cfg)->sdl, "Enable SDL framebuffer"),\
 	OPT_BOOLEAN('\0', "rng", &(cfg)->virtio_rng, "Enable virtio"	\
 			" Random Number Generator"),			\
@@ -130,6 +131,8 @@ void kvm_run_set_wrapper_sandbox(void)
 			" rootfs"),					\
 	OPT_STRING('\0', "hugetlbfs", &(cfg)->hugetlbfs_path, "path",	\
 			"Hugetlbfs path"),				\
+	OPT_INTEGER('t', "threads", &(cfg)->nrthreads,			\
+			 "Number of threads in thread_pool"),		\
 									\
 	OPT_GROUP("Kernel options:"),					\
 	OPT_STRING('k', "kernel", &(cfg)->kernel_filename, "kernel",	\
@@ -163,13 +166,6 @@ void kvm_run_set_wrapper_sandbox(void)
 	OPT_ARCH(RUN, cfg)						\
 	OPT_END()							\
 	};
-
-static void handle_sigalrm(int sig, siginfo_t *si, void *uc)
-{
-	struct kvm *kvm = si->si_value.sival_ptr;
-
-	kvm__arch_periodic_poll(kvm);
-}
 
 static void *kvm_cpu_thread(void *arg)
 {
@@ -350,7 +346,7 @@ void kvm_run_help(void)
 	BUILD_OPTIONS(options, &kvm->cfg, kvm);
 	usage_with_options(run_usage, options);
 }
-#ifndef CONFIG_MIPS
+
 static int kvm_setup_guest_init(struct kvm *kvm)
 {
 	const char *rootfs = kvm->cfg.custom_rootfs_name;
@@ -374,7 +370,7 @@ static int kvm_setup_guest_init(struct kvm *kvm)
 
 	return 0;
 }
-#endif
+
 static int kvm_run_set_sandbox(struct kvm *kvm)
 {
 	const char *guestfs_name = kvm->cfg.custom_rootfs_name;
@@ -486,16 +482,10 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 {
 	static char real_cmdline[2048], default_name[20];
 	unsigned int nr_online_cpus;
-	struct sigaction sa;
 	struct kvm *kvm = kvm__new();
 
 	if (IS_ERR(kvm))
 		return kvm;
-
-	sa.sa_flags = SA_SIGINFO;
-	sa.sa_sigaction = handle_sigalrm;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGALRM, &sa, NULL);
 
 	nr_online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 	kvm->cfg.custom_rootfs_name = "default";
@@ -562,13 +552,10 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 	if (!kvm->cfg.ram_size)
 		kvm->cfg.ram_size = get_ram_size(kvm->cfg.nrcpus);
 
-	if (kvm->cfg.ram_size < MIN_RAM_SIZE_MB)
-		die("Not enough memory specified: %lluMB (min %lluMB)",
-		    (unsigned long long)kvm->cfg.ram_size, MIN_RAM_SIZE_MB);
-
 	if (kvm->cfg.ram_size > host_ram_size())
 		pr_warning("Guest memory size %lluMB exceeds host physical RAM size %lluMB",
-			   (unsigned long long)kvm->cfg.ram_size, (unsigned long long)host_ram_size());
+			(unsigned long long)kvm->cfg.ram_size,
+			(unsigned long long)host_ram_size());
 
 	kvm->cfg.ram_size <<= MB_SHIFT;
 
@@ -605,8 +592,12 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 	if (!kvm->cfg.network)
                 kvm->cfg.network = DEFAULT_NETWORK;
 
+	if (!kvm->cfg.nrthreads || (kvm->cfg.nrthreads < 0) ||
+		((unsigned int) kvm->cfg.nrthreads > nr_online_cpus))
+		kvm->cfg.nrthreads = nr_online_cpus;
+
 	memset(real_cmdline, 0, sizeof(real_cmdline));
-	kvm__arch_set_cmdline(real_cmdline, kvm->cfg.vnc || kvm->cfg.sdl);
+	kvm__arch_set_cmdline(real_cmdline, kvm->cfg.vnc || kvm->cfg.sdl || kvm->cfg.gtk);
 
 	if (strlen(real_cmdline) > 0)
 		strcat(real_cmdline, " ");
@@ -636,7 +627,7 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 			die("Unable to initialize virtio 9p");
 		kvm->cfg.using_rootfs = kvm->cfg.custom_rootfs = 1;
 	}
-#ifndef CONFIG_MIPS
+
 	if (kvm->cfg.using_rootfs) {
 		strcat(real_cmdline, " root=/dev/root rw rootflags=rw,trans=virtio,version=9p2000.L rootfstype=9p");
 		if (kvm->cfg.custom_rootfs) {
@@ -649,16 +640,16 @@ static struct kvm *kvm_cmd_run_init(int argc, const char **argv)
 			if (kvm_setup_guest_init(kvm))
 				die("Failed to setup init for guest.");
 		}
-	} else
-#endif
-		if (!strstr(real_cmdline, "root=")) {
+	} else if (!strstr(real_cmdline, "root=")) {
 		strlcat(real_cmdline, " root=/dev/vda rw ", sizeof(real_cmdline));
 	}
 
 	kvm->cfg.real_cmdline = real_cmdline;
 
-	printf("  # %s run -k %s -m %u -c %d --name %s\n", KVM_BINARY_NAME,
-	       kvm->cfg.kernel_filename, (unsigned)(kvm->cfg.ram_size / 1024 / 1024), kvm->cfg.nrcpus, kvm->cfg.guest_name);
+	printf("  # %s run -k %s -m %Lu -c %d --name %s\n", KVM_BINARY_NAME,
+		kvm->cfg.kernel_filename,
+		(unsigned long long)kvm->cfg.ram_size / 1024 / 1024,
+		kvm->cfg.nrcpus, kvm->cfg.guest_name);
 
 	if (init_list__init(kvm) < 0)
 		die ("Initialisation failed");

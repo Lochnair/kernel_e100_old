@@ -30,6 +30,7 @@ int kvm_cpu__register_kvm_arm_target(struct kvm_arm_target *target)
 
 struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 {
+	struct kvm_arm_target *target;
 	struct kvm_cpu *vcpu;
 	int coalesced_offset, mmap_size, err = -1;
 	unsigned int i;
@@ -56,13 +57,16 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 
 	/* Find an appropriate target CPU type. */
 	for (i = 0; i < ARRAY_SIZE(kvm_arm_targets); ++i) {
-		vcpu_init.target = kvm_arm_targets[i]->id;
+		if (!kvm_arm_targets[i])
+			continue;
+		target = kvm_arm_targets[i];
+		vcpu_init.target = target->id;
 		err = ioctl(vcpu->vcpu_fd, KVM_ARM_VCPU_INIT, &vcpu_init);
 		if (!err)
 			break;
 	}
 
-	if (err || kvm_arm_targets[i]->init(vcpu))
+	if (err || target->init(vcpu))
 		die("Unable to initialise ARM vcpu");
 
 	coalesced_offset = ioctl(kvm->sys_fd, KVM_CHECK_EXTENSION,
@@ -74,7 +78,8 @@ struct kvm_cpu *kvm_cpu__arch_init(struct kvm *kvm, unsigned long cpu_id)
 	/* Populate the vcpu structure. */
 	vcpu->kvm		= kvm;
 	vcpu->cpu_id		= cpu_id;
-	vcpu->cpu_type		= vcpu_init.target;
+	vcpu->cpu_type		= target->id;
+	vcpu->cpu_compatible	= target->compatible;
 	vcpu->is_running	= true;
 	return vcpu;
 }
@@ -93,13 +98,18 @@ bool kvm_cpu__handle_exit(struct kvm_cpu *vcpu)
 	return false;
 }
 
-bool kvm_cpu__emulate_mmio(struct kvm *kvm, u64 phys_addr, u8 *data, u32 len,
-			   u8 is_write)
+bool kvm_cpu__emulate_mmio(struct kvm_cpu *vcpu, u64 phys_addr, u8 *data,
+			   u32 len, u8 is_write)
 {
-	if (arm_addr_in_virtio_mmio_region(phys_addr))
-		return kvm__emulate_mmio(kvm, phys_addr, data, len, is_write);
-	else if (arm_addr_in_pci_mmio_region(phys_addr))
-		die("PCI emulation not supported on ARM!");
+	if (arm_addr_in_virtio_mmio_region(phys_addr)) {
+		return kvm__emulate_mmio(vcpu, phys_addr, data, len, is_write);
+	} else if (arm_addr_in_ioport_region(phys_addr)) {
+		int direction = is_write ? KVM_EXIT_IO_OUT : KVM_EXIT_IO_IN;
+		u16 port = (phys_addr - KVM_IOPORT_AREA) & USHRT_MAX;
+		return kvm__emulate_io(vcpu, port, data, direction, len, 1);
+	} else if (arm_addr_in_pci_region(phys_addr)) {
+		return kvm__emulate_mmio(vcpu, phys_addr, data, len, is_write);
+	}
 
 	return false;
 }

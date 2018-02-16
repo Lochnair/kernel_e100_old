@@ -93,8 +93,7 @@ static inline void atomic_add_unchecked(int i, atomic_unchecked_t *v)
 "	stxr	%w1, %w0, %2\n"
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
-	: "Ir" (i)
-	: "cc");
+	: "Ir" (i));
 }
 
 static inline int atomic_add_return(int i, atomic_t *v)
@@ -138,7 +137,7 @@ static inline int atomic_add_return_unchecked(int i, atomic_unchecked_t *v)
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
 	: "Ir" (i)
-	: "cc", "memory");
+	: "memory");
 
 	return result;
 }
@@ -179,8 +178,7 @@ static inline void atomic_sub_unchecked(int i, atomic_unchecked_t *v)
 "	stxr	%w1, %w0, %2\n"
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
-	: "Ir" (i)
-	: "cc");
+	: "Ir" (i));
 }
 
 static inline int atomic_sub_return(int i, atomic_t *v)
@@ -208,7 +206,7 @@ static inline int atomic_sub_return(int i, atomic_t *v)
 #endif
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
 	: "Ir" (i)
-	: "cc", "memory");
+	: "memory");
 
 	return result;
 }
@@ -245,7 +243,7 @@ static inline int atomic_cmpxchg_unchecked(atomic_unchecked_t *ptr, int old, int
 "2:"
 	: "=&r" (tmp), "=&r" (oldval), "+Q" (ptr->counter)
 	: "Ir" (old), "r" (new)
-	: "cc", "memory");
+	: "cc");
 
 	return oldval;
 }
@@ -360,8 +358,7 @@ static inline void atomic64_add_unchecked(u64 i, atomic64_unchecked_t *v)
 "	stxr	%w1, %0, %2\n"
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
-	: "Ir" (i)
-	: "cc");
+	: "Ir" (i));
 }
 
 static inline long atomic64_add_return(long i, atomic64_t *v)
@@ -406,7 +403,7 @@ static inline long atomic64_add_return_unchecked(long i, atomic64_unchecked_t *v
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
 	: "Ir" (i)
-	: "cc", "memory");
+	: "memory");
 
 	return result;
 }
@@ -448,8 +445,7 @@ static inline void atomic64_sub_unchecked(u64 i, atomic64_unchecked_t *v)
 "	stxr	%w1, %0, %2\n"
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
-	: "Ir" (i)
-	: "cc");
+	: "Ir" (i));
 }
 
 static inline long atomic64_sub_return(long i, atomic64_t *v)
@@ -494,7 +490,7 @@ static inline long atomic64_sub_return_unchecked(long i, atomic64_unchecked_t *v
 "	cbnz	%w1, 1b"
 	: "=&r" (result), "=&r" (tmp), "+Q" (v->counter)
 	: "Ir" (i)
-	: "cc", "memory");
+	: "memory");
 
 	return result;
 }
@@ -532,7 +528,7 @@ static inline long atomic64_cmpxchg_unchecked(atomic64_unchecked_t *ptr, long ol
 "2:"
 	: "=&r" (res), "=&r" (oldval), "+Q" (ptr->counter)
 	: "Ir" (old), "r" (new)
-	: "cc", "memory");
+	: "cc");
 
 	return oldval;
 }

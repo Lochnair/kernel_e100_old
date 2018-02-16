@@ -86,7 +86,7 @@ struct at24_data {
  * This value is forced to be a power of two so that writes align on pages.
  */
 static unsigned io_limit = 128;
-module_param(io_limit, uint, 0);
+module_param(io_limit, uint, 0644);
 MODULE_PARM_DESC(io_limit, "Maximum bytes per I/O (default 128)");
 
 /*
@@ -94,7 +94,7 @@ MODULE_PARM_DESC(io_limit, "Maximum bytes per I/O (default 128)");
  * it's important to recover from write timeouts.
  */
 static unsigned write_timeout = 25;
-module_param(write_timeout, uint, 0);
+module_param(write_timeout, uint, 0644);
 MODULE_PARM_DESC(write_timeout, "Time (in ms) to try writes (default 25)");
 
 #define AT24_SIZE_BYTELEN 5

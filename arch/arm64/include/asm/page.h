@@ -34,9 +34,9 @@
 #ifndef __ASSEMBLY__
 
 #ifdef CONFIG_ARM64_64K_PAGES
-#include <asm/pgtable-3level-types.h>
+#include <asm/pgtable-2level-types.h>
 #else
-#include <asm/pgtable-4level-types.h>
+#include <asm/pgtable-3level-types.h>
 #endif
 
 extern void __cpu_clear_user_page(void *p, unsigned long user);

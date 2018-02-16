@@ -703,7 +703,7 @@ static int do_i2c_rdwr_ioctl(unsigned int fd, unsigned int cmd,
 	for (i = 0; i < nmsgs; i++) {
 		if (copy_in_user(&tmsgs[i].addr, &umsgs[i].addr, 3*sizeof(u16)))
 			return -EFAULT;
-		if (get_user(datap, (u8 __user * __user *)&umsgs[i].buf) ||
+		if (get_user(datap, (compat_caddr_t __user *)&umsgs[i].buf) ||
 		    put_user(compat_ptr(datap), (u8 __user * __user *)&tmsgs[i].buf))
 			return -EFAULT;
 	}
@@ -1540,9 +1540,10 @@ static int compat_ioctl_check_table(unsigned int xcmd)
 	return ioctl_pointer[i] == xcmd;
 }
 
-asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
-				unsigned long arg)
+COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
+		       compat_ulong_t, arg32)
 {
+	unsigned long arg = arg32;
 	struct fd f = fdget(fd);
 	int error = -EBADF;
 	if (!f.file)

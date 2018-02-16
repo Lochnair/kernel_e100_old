@@ -1,10 +1,37 @@
 #include "kvm/kvm-cpu.h"
 #include "kvm/kvm.h"
+#include "kvm/virtio.h"
 
 #include <asm/ptrace.h>
 
 #define ARM_CORE_REG(x)	(KVM_REG_ARM | KVM_REG_SIZE_U32 | KVM_REG_ARM_CORE | \
 			 KVM_REG_ARM_CORE_REG(x))
+
+#define ARM_CP15_REG_SHIFT_MASK(x,n)		\
+	(((x) << KVM_REG_ARM_ ## n ## _SHIFT) & KVM_REG_ARM_ ## n ## _MASK)
+
+#define __ARM_CP15_REG(op1,crn,crm,op2)			\
+	(KVM_REG_ARM | KVM_REG_SIZE_U32		|	\
+	 (15 << KVM_REG_ARM_COPROC_SHIFT)	|	\
+	 ARM_CP15_REG_SHIFT_MASK(op1, OPC1)	|	\
+	 ARM_CP15_REG_SHIFT_MASK(crn, 32_CRN)	|	\
+	 ARM_CP15_REG_SHIFT_MASK(crm, CRM)	|	\
+	 ARM_CP15_REG_SHIFT_MASK(op2, 32_OPC2))
+
+#define ARM_CP15_REG(...)	__ARM_CP15_REG(__VA_ARGS__)
+
+unsigned long kvm_cpu__get_vcpu_mpidr(struct kvm_cpu *vcpu)
+{
+	struct kvm_one_reg reg;
+	u32 mpidr;
+
+	reg.id = ARM_CP15_REG(ARM_CPU_ID, ARM_CPU_ID_MPIDR);
+	reg.addr = (u64)(unsigned long)&mpidr;
+	if (ioctl(vcpu->vcpu_fd, KVM_GET_ONE_REG, &reg) < 0)
+		die("KVM_GET_ONE_REG failed (get_mpidr vcpu%ld", vcpu->cpu_id);
+
+	return mpidr;
+}
 
 void kvm_cpu__reset_vcpu(struct kvm_cpu *vcpu)
 {
@@ -50,29 +77,41 @@ void kvm_cpu__reset_vcpu(struct kvm_cpu *vcpu)
 		die_perror("KVM_SET_ONE_REG failed (pc)");
 }
 
-void kvm_cpu__show_code(struct kvm_cpu *vcpu)
+int kvm_cpu__get_endianness(struct kvm_cpu *vcpu)
 {
 	struct kvm_one_reg reg;
 	u32 data;
 
+	reg.id = ARM_CORE_REG(usr_regs.ARM_cpsr);
+	reg.addr = (u64)(unsigned long)&data;
+	if (ioctl(vcpu->vcpu_fd, KVM_GET_ONE_REG, &reg) < 0)
+		die("KVM_GET_ONE_REG failed (cpsr)");
+
+	return (data & PSR_E_BIT) ? VIRTIO_ENDIAN_BE : VIRTIO_ENDIAN_LE;
+}
+
+void kvm_cpu__show_code(struct kvm_cpu *vcpu)
+{
+	struct kvm_one_reg reg;
+	u32 data;
+	int debug_fd = kvm_cpu__get_debug_fd();
+
 	reg.addr = (u64)(unsigned long)&data;
 
-	printf("*pc:\n");
+	dprintf(debug_fd, "\n*pc:\n");
 	reg.id = ARM_CORE_REG(usr_regs.ARM_pc);
 	if (ioctl(vcpu->vcpu_fd, KVM_GET_ONE_REG, &reg) < 0)
 		die("KVM_GET_ONE_REG failed (show_code @ PC)");
 
-	kvm__dump_mem(vcpu->kvm, data, 32);
-	printf("\n");
+	kvm__dump_mem(vcpu->kvm, data, 32, debug_fd);
 
-	printf("*lr (svc):\n");
+	dprintf(debug_fd, "\n*lr (svc):\n");
 	reg.id = ARM_CORE_REG(svc_regs[1]);
 	if (ioctl(vcpu->vcpu_fd, KVM_GET_ONE_REG, &reg) < 0)
 		die("KVM_GET_ONE_REG failed (show_code @ LR_svc)");
 	data &= ~0x1;
 
-	kvm__dump_mem(vcpu->kvm, data, 32);
-	printf("\n");
+	kvm__dump_mem(vcpu->kvm, data, 32, debug_fd);
 }
 
 void kvm_cpu__show_registers(struct kvm_cpu *vcpu)

@@ -74,6 +74,9 @@ int ioremap_page_range(unsigned long addr,
 	unsigned long start;
 	unsigned long next;
 	int err;
+#ifdef CONFIG_PAX_SEC_PGD	
+	pgd_t *pgd_pax = pgd_offset_pax(addr);
+#endif
 
 	BUG_ON(addr >= end);
 
@@ -85,7 +88,12 @@ int ioremap_page_range(unsigned long addr,
 		err = ioremap_pud_range(pgd, addr, next, phys_addr+addr, prot);
 		if (err)
 			break;
+#ifdef CONFIG_PAX_SEC_PGD	
+		*pgd_pax = *pgd;
+	} while (pgd++, pgd_pax++, addr = next, addr != end);
+#else
 	} while (pgd++, addr = next, addr != end);
+#endif
 
 	flush_cache_vmap(start, end);
 

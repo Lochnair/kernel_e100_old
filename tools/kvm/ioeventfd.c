@@ -8,6 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/kvm.h>
 #include <linux/types.h>
+#include <linux/byteorder.h>
 
 #include "kvm/ioeventfd.h"
 #include "kvm/kvm.h"
@@ -120,7 +121,7 @@ int ioeventfd__exit(struct kvm *kvm)
 }
 base_exit(ioeventfd__exit);
 
-int ioeventfd__add_event(struct ioevent *ioevent, bool is_pio, bool poll_in_userspace)
+int ioeventfd__add_event(struct ioevent *ioevent, int flags)
 {
 	struct kvm_ioeventfd kvm_ioevent;
 	struct epoll_event epoll_event;
@@ -140,12 +141,12 @@ int ioeventfd__add_event(struct ioevent *ioevent, bool is_pio, bool poll_in_user
 	kvm_ioevent = (struct kvm_ioeventfd) {
 		.addr		= ioevent->io_addr,
 		.len		= ioevent->io_len,
-		.datamatch	= ioevent->datamatch,
+		.datamatch	= cpu_to_le64(ioevent->datamatch),
 		.fd		= event,
 		.flags		= KVM_IOEVENTFD_FLAG_DATAMATCH,
 	};
 
-	if (is_pio)
+	if (flags & IOEVENTFD_FLAG_PIO)
 		kvm_ioevent.flags |= KVM_IOEVENTFD_FLAG_PIO;
 
 	r = ioctl(ioevent->fn_kvm->vm_fd, KVM_IOEVENTFD, &kvm_ioevent);
@@ -154,7 +155,7 @@ int ioeventfd__add_event(struct ioevent *ioevent, bool is_pio, bool poll_in_user
 		goto cleanup;
 	}
 
-	if (!poll_in_userspace)
+	if (!(flags & IOEVENTFD_FLAG_USER_POLL))
 		return 0;
 
 	epoll_event = (struct epoll_event) {
@@ -199,7 +200,7 @@ int ioeventfd__del_event(u64 addr, u64 datamatch)
 	kvm_ioevent = (struct kvm_ioeventfd) {
 		.addr			= ioevent->io_addr,
 		.len			= ioevent->io_len,
-		.datamatch		= ioevent->datamatch,
+		.datamatch		= cpu_to_le64(ioevent->datamatch),
 		.flags			= KVM_IOEVENTFD_FLAG_PIO
 					| KVM_IOEVENTFD_FLAG_DEASSIGN
 					| KVM_IOEVENTFD_FLAG_DATAMATCH,

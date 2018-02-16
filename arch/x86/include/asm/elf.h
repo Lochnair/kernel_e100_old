@@ -155,8 +155,9 @@ do {						\
 #define elf_check_arch(x)			\
 	((x)->e_machine == EM_X86_64)
 
-#define compat_elf_check_arch(x)		\
-	(elf_check_arch_ia32(x) || (x)->e_machine == EM_X86_64)
+#define compat_elf_check_arch(x)					\
+	(elf_check_arch_ia32(x) ||					\
+	 (IS_ENABLED(CONFIG_X86_X32_ABI) && (x)->e_machine == EM_X86_64))
 
 #if __USER32_DS != __USER_DS
 # error "The following code assumes __USER32_DS == __USER_DS"
@@ -289,7 +290,7 @@ struct task_struct;
 
 #define	ARCH_DLINFO_IA32(vdso_enabled)					\
 do {									\
-	if (vdso_enabled) {						\
+	if (VDSO_CURRENT_BASE) {					\
 		NEW_AUX_ENT(AT_SYSINFO,	VDSO_ENTRY);			\
 		NEW_AUX_ENT(AT_SYSINFO_EHDR, VDSO_CURRENT_BASE);	\
 	}								\
@@ -349,6 +350,11 @@ extern int x32_setup_additional_pages(struct linux_binprm *bprm,
 
 extern int syscall32_setup_pages(struct linux_binprm *, int exstack);
 #define compat_arch_setup_additional_pages	syscall32_setup_pages
+
+#ifndef CONFIG_PAX_ASLR
+extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+#define arch_randomize_brk arch_randomize_brk
+#endif
 
 /*
  * True on X86_32 or when emulating IA32 on X86_64

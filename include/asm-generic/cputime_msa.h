@@ -32,14 +32,12 @@ typedef u64 cputime64_t;
 #define cputime64_zero			0
 #define cputime64_add(__a, __b)		((__a) + (__b))
 #define cputime64_sub(__a, __b)		((__a) - (__b))
-#define cputime64_to_jiffies64(__ct)	(__ct)
-#define jiffies64_to_cputime64(__jif)	(__jif)
+#define cputime64_to_jiffies64(__ct)	(nsecs_to_jiffies64(__ct))
+#define jiffies64_to_cputime64(__jif)	\
+	(__force cputime_t)((__jif) * (NSEC_PER_SEC / HZ))
 #define cputime_to_cputime64(__ct)	(__ct)
-#define nsecs_to_cputime64(__ct)	\
-	jiffies64_to_cputime64(nsecs_to_jiffies64(__ct))
-#define usecs_to_cputime64(__ct)	\
-	jiffies64_to_cputime64(nsecs_to_jiffies64((__ct)*1000))
-
+#define nsecs_to_cputime64(__ct)	(__ct)
+#define usecs_to_cputime64(__ct)	((__ct)*1000)
 /*
  * Convert cputime to microseconds
  */

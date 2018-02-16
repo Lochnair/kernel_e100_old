@@ -32,6 +32,9 @@
 #ifndef CONFIG_PREEMPT
 FEXPORT(ret_from_exception)
 	local_irq_disable			# preempt stop
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_off
+#endif
 	b	__ret_from_irq
 #endif
 FEXPORT(ret_from_irq)
@@ -50,6 +53,9 @@ resume_userspace:
 	local_irq_disable		# make sure we dont miss an
 					# interrupt setting need_resched
 					# between sampling and return
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_off
+#endif
 	LONG_L	a2, TI_FLAGS($28)	# current->work
 	andi	t0, a2, _TIF_WORK_MASK	# (ignoring syscall_trace)
 	bnez	t0, work_pending
@@ -59,6 +65,9 @@ resume_userspace:
 #ifdef CONFIG_PREEMPT
 resume_kernel:
 	local_irq_disable
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_off
+#endif
 	lw	t0, TI_PRE_COUNT($28)
 	bnez	t0, restore_all
 need_resched:
@@ -85,6 +94,9 @@ FEXPORT(syscall_exit)
 	local_irq_disable		# make sure need_resched and
 					# signals dont change between
 					# sampling and return
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_off
+#endif
 	LONG_L	a2, TI_FLAGS($28)	# current->work
 	li	t0, _TIF_ALLWORK_MASK
 	and	t0, a2, t0
@@ -149,7 +161,6 @@ restore_partial:		# restore partial frame
 1:	jal	trace_hardirqs_off
 2:
 #endif
-	MSA_USER
 	RESTORE_TEMP
 	RESTORE_AT
 	RESTORE_STATIC
@@ -167,6 +178,9 @@ work_resched:
 	local_irq_disable		# make sure need_resched and
 					# signals dont change between
 					# sampling and return
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_off
+#endif
 	LONG_L	a2, TI_FLAGS($28)
 	andi	t0, a2, _TIF_WORK_MASK	# is there any work to be done
 					# other than syscall tracing?
@@ -190,11 +204,17 @@ work_notifysig:				# deal with pending signals and
 FEXPORT(syscall_exit_partial)
 	local_irq_disable		# make sure need_resched doesn't
 					# change between and return
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_off
+#endif
 	LONG_L	a2, TI_FLAGS($28)	# current->work
 	li	t0, _TIF_ALLWORK_MASK
 	and	t0, a2
-	beqz	t0, restore_partial
-	SAVE_STATIC
+	bnez	t0, syscall_exit_save
+	MSA_USER
+	j	restore_partial
+syscall_exit_save:
+	SAVE_STATIC docfi=0
 syscall_exit_work:
 	LONG_L	t0, PT_STATUS(sp)		# returning to kernel mode?
 	andi	t0, t0, KU_USER
@@ -202,8 +222,12 @@ syscall_exit_work:
 	li	t0, _TIF_WORK_SYSCALL_EXIT
 	and	t0, a2			# a2 is preloaded with TI_FLAGS
 	beqz	t0, work_pending	# trace bit set?
-	local_irq_enable		# could let syscall_trace_leave()
+					# could let syscall_trace_leave()
 					# call schedule() instead
+#ifdef CONFIG_TRACE_IRQFLAGS
+	jal	trace_hardirqs_on
+#endif
+	local_irq_enable
 	move	a0, sp
 	jal	syscall_trace_leave
 	b	resume_userspace

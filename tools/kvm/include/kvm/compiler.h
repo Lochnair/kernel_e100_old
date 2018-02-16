@@ -1,8 +1,6 @@
 #ifndef KVM_COMPILER_H_
 #define KVM_COMPILER_H_
 
-#include <uapi/linux/compiler.h>
-
 #ifndef __compiletime_error
 # define __compiletime_error(message)
 #endif

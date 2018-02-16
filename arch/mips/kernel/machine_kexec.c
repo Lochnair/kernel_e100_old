@@ -12,6 +12,7 @@
 
 #include <asm/cacheflush.h>
 #include <asm/page.h>
+#include <asm/pgtable.h>
 
 extern const unsigned char relocate_new_kernel[];
 extern const size_t relocate_new_kernel_size;
@@ -71,8 +72,12 @@ machine_kexec(struct kimage *image)
 	kexec_start_address =
 		(unsigned long) phys_to_virt(image->start);
 
-	kexec_indirection_page =
-		(unsigned long) phys_to_virt(image->head & PAGE_MASK);
+	if (image->type == KEXEC_TYPE_DEFAULT) {
+		kexec_indirection_page =
+			(unsigned long) phys_to_virt(image->head & PAGE_MASK);
+	} else {
+		kexec_indirection_page = (unsigned long)&image->head;
+	}
 
 	memcpy((void*)reboot_code_buffer, relocate_new_kernel,
 	       relocate_new_kernel_size);
@@ -107,4 +112,33 @@ machine_kexec(struct kimage *image)
 	atomic_set(&kexec_ready_to_reboot, 1);
 #endif
 	((noretfun_t) reboot_code_buffer)();
+}
+
+void arch_crash_save_vmcoreinfo(void)
+{
+	VMCOREINFO_NUMBER(PAGE_SHIFT);
+	VMCOREINFO_NUMBER(PGD_ORDER);
+#if defined(CONFIG_32BIT) || !defined(CONFIG_PAGE_SIZE_64KB)
+	VMCOREINFO_NUMBER(PMD_ORDER);
+#endif
+	VMCOREINFO_NUMBER(PTE_ORDER);
+	VMCOREINFO_NUMBER(_PAGE_PRESENT);
+#ifdef CONFIG_MIPS_HUGE_TLB_SUPPORT
+	VMCOREINFO_NUMBER(_PAGE_HUGE);
+#endif
+#ifdef CONFIG_64BIT
+#ifdef CONFIG_MAPPED_KERNEL
+	VMCOREINFO_ADDRESS(_text);
+	VMCOREINFO_ADDRESS(_end);
+	VMCOREINFO_ADDRESS(phys_to_kernel_offset);
+#endif
+	VMCOREINFO_ADDRESS(CKSEG0);
+	VMCOREINFO_ADDRESS(CKSSEG);
+#else /* CONFIG_64BIT */
+	VMCOREINFO_ADDRESS(PHYS_OFFSET);
+#endif /* CONFIG_64BIT */
+
+	VMCOREINFO_ADDRESS(PAGE_OFFSET);
+	VMCOREINFO_ADDRESS(IO_BASE);
+	VMCOREINFO_NUMBER(_PFN_SHIFT);
 }

@@ -126,7 +126,6 @@ static int xfrm_output_one(struct sk_buff *skb, int err)
             {
                 err = x->type->output(x, skb);
             }
-
         }
         else
         {

@@ -97,7 +97,7 @@ typedef cvm_oct_callback_result_t (*cvm_oct_callback_t)(struct net_device *dev,
 extern struct net_device *cvm_oct_register_callback(const char *, cvm_oct_callback_t);
 extern struct net_device *is_oct_dev(const char *device_name);
 
-#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD 
 extern int cvm_oct_transmit_qos(struct net_device *dev,
 				void *work_queue_entry,
 				int do_free,
@@ -106,7 +106,17 @@ extern int cvm_oct_transmit_qos(struct net_device *dev,
 extern int cvm_oct_transmit_qos_not_free(struct net_device *dev,
 					 void *work_queue_entry,
 					 struct sk_buff *skb);
-#else
+
+extern struct net_device *octeon3_register_callback(const char	*device_name,
+						    cvm_oct_callback_t	callback);
+
+extern struct net_device *octeon3_is_oct_dev(const char *device_name);
+
+extern int octeon3_transmit_qos(struct net_device *dev, 
+				void *work, 
+				int do_free,
+				int qos);
+#else 
 extern int cvm_oct_transmit_qos(struct net_device *dev, void *work_queue_entry,
 			 int do_free, int qos);
 #endif

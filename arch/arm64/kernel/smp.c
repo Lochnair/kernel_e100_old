@@ -39,6 +39,7 @@
 #include <asm/atomic.h>
 #include <asm/cacheflush.h>
 #include <asm/cputype.h>
+#include <asm/cpu_ops.h>
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -62,16 +63,14 @@ enum ipi_msg_type {
 	IPI_CPU_STOP,
 };
 
-static const struct smp_operations *smp_ops[NR_CPUS];
-
 /*
  * Boot a secondary CPU, and assign it the specified idle task.
  * This also gives us the initial stack to use for this CPU.
  */
 static int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
-	if (smp_ops[cpu]->cpu_boot)
-		return smp_ops[cpu]->cpu_boot(cpu);
+	if (cpu_ops[cpu]->cpu_boot)
+		return cpu_ops[cpu]->cpu_boot(cpu);
 
 	return -EOPNOTSUPP;
 }
@@ -143,8 +142,17 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 	preempt_disable();
 	trace_hardirqs_off();
 
-	if (smp_ops[cpu]->cpu_postboot)
-		smp_ops[cpu]->cpu_postboot();
+	if (cpu_ops[cpu]->cpu_postboot)
+		cpu_ops[cpu]->cpu_postboot();
+	/*
+	 * Enable GIC and timers.
+	 */
+	notify_cpu_starting(cpu);
+
+	/*
+	 * Log the CPU info before it is marked online and might get read.
+	 */
+	cpuinfo_store_cpu();
 
 	/*
 	 * OK, now it's safe to let the boot CPU continue.  Wait for
@@ -154,13 +162,8 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 	set_cpu_online(cpu, true);
 	complete(&cpu_running);
 
-	/*
-	 * Enable GIC and timers.
-	 */
-	notify_cpu_starting(cpu);
-
+	local_dbg_enable();
 	local_irq_enable();
-	local_fiq_enable();
 
 	/*
 	 * OK, it's off to the idle thread for us
@@ -173,17 +176,17 @@ static int __cpuinit op_cpu_disable(unsigned int cpu)
 {
 	/*
 	 * If we don't have a cpu_die method, abort before we reach the point
-	 * of no return. CPU0 may not have an smp_ops, so test for it.
+	 * of no return. CPU0 may not have an cpu_ops, so test for it.
 	 */
-	if (!smp_ops[cpu] || !smp_ops[cpu]->cpu_die)
+	if (!cpu_ops[cpu] || !cpu_ops[cpu]->cpu_die)
 		return -EOPNOTSUPP;
 
 	/*
 	 * We may need to abort a hot unplug for some other mechanism-specific
 	 * reason.
 	 */
-	if (smp_ops[cpu]->cpu_disable)
-		return smp_ops[cpu]->cpu_disable(cpu);
+	if (cpu_ops[cpu]->cpu_disable)
+		return cpu_ops[cpu]->cpu_disable(cpu);
 
 	return 0;
 }
@@ -219,6 +222,19 @@ int __cpuinit __cpu_disable(void)
 	return 0;
 }
 
+static int __cpuinit op_cpu_kill(unsigned int cpu)
+{
+	/*
+	 * If we have no means of synchronising with the dying CPU, then assume
+	 * that it is really dead. We can only wait for an arbitrary length of
+	 * time and hope that it's dead, so let's skip the wait and just hope.
+	 */
+	if (!cpu_ops[cpu]->cpu_kill)
+		return 1;
+
+	return cpu_ops[cpu]->cpu_kill(cpu);
+}
+
 static DECLARE_COMPLETION(cpu_died);
 
 /*
@@ -232,6 +248,15 @@ void __cpuinit __cpu_die(unsigned int cpu)
 		return;
 	}
 	pr_notice("CPU%u: shutdown\n", cpu);
+
+	/*
+	 * Now that the dying CPU is beyond the point of no return w.r.t.
+	 * in-kernel synchronisation, try to get the firwmare to help us to
+	 * verify that it has really left the kernel before we consider
+	 * clobbering anything it might still be using.
+	 */
+	if (!op_cpu_kill(cpu))
+		pr_warn("CPU%d may not have shut down cleanly\n", cpu);
 }
 
 /*
@@ -257,7 +282,7 @@ void __ref cpu_die(void)
 	/*
 	 * Actually shutdown the CPU. This must never fail.
 	 */
-	smp_ops[cpu]->cpu_die(cpu);
+	cpu_ops[cpu]->cpu_die(cpu);
 
 	BUG();
 }
@@ -280,26 +305,6 @@ void __init smp_prepare_boot_cpu(void)
 
 static void (*smp_cross_call)(const struct cpumask *, unsigned int);
 
-static const struct smp_operations *supported_smp_ops[] __initconst = {
-	&smp_spin_table_ops,
-	&smp_psci_ops,
-	NULL,
-};
-
-static const struct smp_operations * __init smp_get_ops(const char *name)
-{
-	const struct smp_operations **ops = supported_smp_ops;
-
-	while (*ops) {
-		if (!strcmp(name, (*ops)->name))
-			return *ops;
-
-		ops++;
-	}
-
-	return NULL;
-}
-
 /*
  * Enumerate the possible CPU set from the device tree and build the
  * cpu logical map array containing MPIDR values related to logical
@@ -307,7 +312,6 @@ static const struct smp_operations * __init smp_get_ops(const char *name)
  */
 void __init smp_init_cpus(void)
 {
-	const char *enable_method;
 	struct device_node *dn = NULL;
 	unsigned int i, cpu = 1;
 	bool bootcpu_valid = false;
@@ -351,8 +355,6 @@ void __init smp_init_cpus(void)
 			}
 		}
 
-		enable_method = of_get_property(dn, "enable-method", NULL);
-
 		/*
 		 * The numbering scheme requires that the boot CPU
 		 * must be assigned logical id 0. Record it so that
@@ -368,12 +370,11 @@ void __init smp_init_cpus(void)
 
 			bootcpu_valid = true;
 
-			if (enable_method)
-				smp_ops[0] = smp_get_ops(enable_method);
-
 			/*
-			 * cpu_logical_map has already been initialized so
-			 * continue without incrementing cpu.
+			 * cpu_logical_map has already been
+			 * initialized and the boot cpu doesn't need
+			 * the enable-method so continue without
+			 * incrementing cpu.
 			 */
 			continue;
 		}
@@ -381,21 +382,10 @@ void __init smp_init_cpus(void)
 		if (cpu >= NR_CPUS)
 			goto next;
 
-		if (!enable_method) {
-			pr_err("%s: missing enable-method property\n",
-				dn->full_name);
+		if (cpu_read_ops(dn, cpu) != 0)
 			goto next;
-		}
 
-		smp_ops[cpu] = smp_get_ops(enable_method);
-
-		if (!smp_ops[cpu]) {
-			pr_err("%s: invalid enable-method property: %s\n",
-			       dn->full_name, enable_method);
-			goto next;
-		}
-
-		if (smp_ops[cpu]->cpu_init(dn, cpu))
+		if (cpu_ops[cpu]->cpu_init(dn, cpu))
 			goto next;
 
 		pr_debug("cpu logical map 0x%llx\n", hwid);
@@ -453,10 +443,10 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 		if (cpu == smp_processor_id())
 			continue;
 
-		if (!smp_ops[cpu])
+		if (!cpu_ops[cpu])
 			continue;
 
-		err = smp_ops[cpu]->cpu_prepare(cpu);
+		err = cpu_ops[cpu]->cpu_prepare(cpu);
 		if (err)
 			continue;
 
@@ -531,7 +521,6 @@ static void ipi_cpu_stop(unsigned int cpu)
 
 	set_cpu_online(cpu, false);
 
-	local_fiq_disable();
 	local_irq_disable();
 
 	while (1)

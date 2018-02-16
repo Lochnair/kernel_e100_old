@@ -395,9 +395,9 @@ static void amd_e400_idle(void)
 		 * The switch back from broadcast mode needs to be
 		 * called with interrupts disabled.
 		 */
-		 local_irq_disable();
-		 clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT, &cpu);
-		 local_irq_enable();
+		local_irq_disable();
+		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT, &cpu);
+		local_irq_enable();
 	} else
 		default_idle();
 }
@@ -459,6 +459,14 @@ static int __init idle_setup(char *str)
 	return 0;
 }
 early_param("idle", idle_setup);
+
+#ifndef CONFIG_PAX_ASLR
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	unsigned long range_end = mm->brk + 0x02000000;
+	return randomize_range(mm->brk, range_end, 0) ? : mm->brk;
+}
+#endif
 
 #ifdef CONFIG_PAX_RANDKSTACK
 void pax_randomize_kstack(struct pt_regs *regs)

@@ -14,10 +14,14 @@
 
 #include <asm/octeon/octeon-hw-status.h>
 #include <asm/octeon/octeon.h>
+#include <asm/octeon/cvmx-lbk-defs.h>
 
 /* Module parameter to disable error reporting */
 static int disable;
 module_param(disable, int, S_IRUGO);
+
+static int octeon_78xx_tree_size;
+static struct cvmx_error_78xx *octeon_78xx_error_array;
 
 static struct cvmx_error_muxchild *octeon_error_tree_current;
 
@@ -169,6 +173,57 @@ static int octeon_error_tree_hw_status(struct notifier_block *nb, unsigned long 
 
 static struct notifier_block octeon_error_tree_notifier;
 
+static int __octeon_error3_tree_change_group(enum cvmx_error_groups group, int unit, int op)
+{
+	int i;
+	int interface = (unit >> 8) & 0x7;
+	int node = (unit >> 12) & 0x3;
+	int index = (unit >> 4) & 0xf;
+	uint64_t match_ifindex = interface*0x1000000 + index*0x100000;
+
+	if (!octeon_has_feature(OCTEON_FEATURE_CIU3))
+		return 0;
+
+	for (i = 0; i < octeon_78xx_tree_size; i++) {
+		enum cvmx_error_groups grp;
+		grp = octeon_78xx_error_array[i].error_group;
+		if (grp == group) {
+			if (grp == CVMX_ERROR_GROUP_ETHERNET) {
+				/* Skip loopback interface */
+				if (octeon_78xx_error_array[i].block_csr
+						== (CVMX_LBK_INT & ~(1ull << 63)))
+					continue;
+
+				/* Only enable the unit requested */
+				if ((octeon_78xx_error_array[i].block_csr
+				     & 0xff00000ull) != match_ifindex)
+					continue;
+			}
+			/* Enable or disable error interrupt */
+			if (op == 1)
+				octeon_ciu3_errbits_disable_intsn(node,
+					octeon_78xx_error_array[i].intsn);
+			else
+				octeon_ciu3_errbits_enable_intsn(node,
+					octeon_78xx_error_array[i].intsn);
+		}
+	}
+
+	return 0;
+}
+
+int octeon_error3_tree_disable(enum cvmx_error_groups group, int unit)
+{
+	return __octeon_error3_tree_change_group(group, unit, 1);
+}
+EXPORT_SYMBOL(octeon_error3_tree_disable);
+
+int octeon_error3_tree_enable(enum cvmx_error_groups group, int unit)
+{
+	return __octeon_error3_tree_change_group(group, unit, 0);
+}
+EXPORT_SYMBOL(octeon_error3_tree_enable);
+
 int octeon_error_tree_disable(enum cvmx_error_groups group, int unit)
 {
 	struct cvmx_error_muxchild *base;
@@ -180,6 +235,9 @@ int octeon_error_tree_disable(enum cvmx_error_groups group, int unit)
 
 	if (!octeon_error_tree_current)
 		return -ENODEV;
+
+	if (octeon_has_feature(OCTEON_FEATURE_CIU3))
+		return octeon_error3_tree_disable(group, unit);
 
 	base = octeon_error_tree_current->children->children;
 
@@ -217,6 +275,9 @@ int octeon_error_tree_enable(enum cvmx_error_groups group, int unit)
 	if (!octeon_error_tree_current)
 		return -ENODEV;
 
+	if (octeon_has_feature(OCTEON_FEATURE_CIU3))
+		return octeon_error3_tree_enable(group, unit);
+
 	memset(sr, 0, sizeof(sr));
 	base = octeon_error_tree_current->children->children;
 
@@ -250,7 +311,7 @@ static int __init octeon_error_tree_init(void)
 	u32 prid = read_c0_prid();
 	struct cvmx_error_tree *tree = octeon_error_trees;
 
-	if (disable)
+	if (disable || octeon_has_feature(OCTEON_FEATURE_CIU3))
 		return 0;
 
 	while (tree->tree) {
@@ -274,3 +335,103 @@ static int __init octeon_error_tree_init(void)
 	return octeon_error_tree_enable(CVMX_ERROR_GROUP_INTERNAL, -1);
 }
 arch_initcall(octeon_error_tree_init);
+
+static void octeon_error_tree_handler78(int node, int intsn)
+{
+	int idx, prev_low, prev_high;
+	char msg[128];
+
+	prev_low = 0;
+	prev_high = octeon_78xx_tree_size - 1;
+
+	idx = octeon_78xx_tree_size / 2;
+
+	/* Try to do a binary search */
+	while (prev_low < prev_high && octeon_78xx_error_array[idx].intsn != intsn) {
+		if (octeon_78xx_error_array[idx].intsn < intsn) {
+			prev_low = idx + 1;
+			idx += (prev_high - idx) / 2;
+			if (idx < prev_low)
+				idx = prev_low;
+		} else {
+			prev_high = idx - 1;
+			idx -= (idx - prev_low) / 2;
+			if (idx > prev_high)
+				idx = prev_high;
+		}
+	}
+	if (octeon_78xx_error_array[idx].intsn == intsn) {
+		snprintf(msg, sizeof(msg), octeon_78xx_error_array[idx].err_mesg,
+			 octeon_78xx_error_array[idx].block_csr, octeon_78xx_error_array[idx].block_csr_bitpos);
+		pr_err("Node-%d: %s\n", node, msg);
+		if (octeon_78xx_error_array[idx].flags == CVMX_ERROR_TYPE_DBE)
+			panic("Uncorrectable co-processor double bit error detected!\n");
+		if (octeon_78xx_error_array[idx].block_csr) {
+			u64 clear_addr;
+			clear_addr = 0x8000000000000000ull | octeon_78xx_error_array[idx].block_csr;
+			cvmx_write_csr_node(node, clear_addr, 1ull << octeon_78xx_error_array[idx].block_csr_bitpos);
+		}
+	} else {
+		pr_err("ERROR: Unknown intsn 0x%x\n", intsn);
+		octeon_ciu3_errbits_disable_intsn(node, intsn);
+	}
+}
+
+int octeon_error_tree_shutdown(void)
+{
+	int i, node;
+
+	if (disable || !octeon_has_feature(OCTEON_FEATURE_CIU3))
+		return 0;
+
+	for_each_online_node(node) {
+		for (i = 0; octeon_78xx_error_array[i].intsn < 0xfffff; i++) {
+			enum cvmx_error_groups group;
+			group = octeon_78xx_error_array[i].error_group;
+			if (group == CVMX_ERROR_GROUP_INTERNAL)
+				octeon_ciu3_errbits_disable_intsn(node, octeon_78xx_error_array[i].intsn);
+		}
+	}
+
+       return 0;
+}
+EXPORT_SYMBOL(octeon_error_tree_shutdown);
+
+static int __init octeon_error_tree_init78(void)
+{
+	int i, node;
+	u32 prid = read_c0_prid();
+	struct cvmx_error_array *array = octeon_error_arrays;
+
+	if (disable || !octeon_has_feature(OCTEON_FEATURE_CIU3))
+		return 0;
+
+	for (i = 0; array->array != NULL; i++) {
+		if ((prid & array->prid_mask) == array->prid_val) {
+			octeon_78xx_tree_size = cvmx_error_78xx_array_sizes[i];
+			break;
+		}
+		array++;
+	}
+
+	if (!array->array) {
+		pr_err("Error: No error tree for prid = 0x%08x\n", prid);
+		return -ENODEV;
+	}
+	pr_notice("Installing handlers for error tree at: %p\n", array->array);
+
+	octeon_ciu3_errbits_set_handler(octeon_error_tree_handler78);
+
+	octeon_78xx_error_array = array->array;
+
+	for_each_online_node(node)
+		for (i = 0; octeon_78xx_error_array[i].intsn < 0xfffff; i++) {
+			enum cvmx_error_groups group;
+			group = octeon_78xx_error_array[i].error_group;
+			if (group == CVMX_ERROR_GROUP_INTERNAL)
+				octeon_ciu3_errbits_enable_intsn(node, octeon_78xx_error_array[i].intsn);
+		}
+
+	return 0;
+}
+arch_initcall(octeon_error_tree_init78);

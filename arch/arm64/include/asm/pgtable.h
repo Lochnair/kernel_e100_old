@@ -21,19 +21,25 @@
 #include <asm/memory.h>
 #include <asm/pgtable-hwdef.h>
 
+#ifdef CONFIG_PAX_KERNEXEC
+#define ktla_ktva(addr)		(addr)
+#define ktva_ktla(addr)		(addr)
+#endif
+
 /*
  * Software defined PTE bits definition.
  */
 #define PTE_VALID		(_AT(pteval_t, 1) << 0)
-#define PTE_FILE		(_AT(pteval_t, 1) << 1)	/* only when !pte_present() */
-#define PTE_PROT_NONE		(_AT(pteval_t, 1) << 2)	/* only when !PTE_VALID */
+#define PTE_FILE		(_AT(pteval_t, 1) << 2)	/* only when !pte_present() */
 #define PTE_DIRTY		(_AT(pteval_t, 1) << 55)
 #define PTE_SPECIAL		(_AT(pteval_t, 1) << 56)
+#define PTE_WRITE		(_AT(pteval_t, 1) << 57)
+#define PTE_PROT_NONE		(_AT(pteval_t, 1) << 58) /* only when !PTE_VALID */
 
 /*
  * VMALLOC and SPARSEMEM_VMEMMAP ranges.
  */
-#define VMALLOC_START		UL(0xffff800000000000)
+#define VMALLOC_START		(UL(0xffffffffffffffff) << VA_BITS)
 #define VMALLOC_END		(PAGE_OFFSET - UL(0x400000000) - SZ_64K)
 
 #define vmemmap			((struct page *)(VMALLOC_END + SZ_64K))
@@ -43,13 +49,11 @@
 #ifndef __ASSEMBLY__
 extern void __pte_error(const char *file, int line, unsigned long val);
 extern void __pmd_error(const char *file, int line, unsigned long val);
-extern void __pud_error(const char *file, int line, unsigned long val);
 extern void __pgd_error(const char *file, int line, unsigned long val);
 
 #define pte_ERROR(pte)		__pte_error(__FILE__, __LINE__, pte_val(pte))
-#define pmd_ERROR(pmd)		__pmd_error(__FILE__, __LINE__, pmd_val(pmd))
 #ifndef CONFIG_ARM64_64K_PAGES
-#define pud_ERROR(pud)		__pud_error(__FILE__, __LINE__, pud_val(pud))
+#define pmd_ERROR(pmd)		__pmd_error(__FILE__, __LINE__, pmd_val(pmd))
 #endif
 #define pgd_ERROR(pgd)		__pgd_error(__FILE__, __LINE__, pgd_val(pgd))
 
@@ -68,15 +72,21 @@ extern pgprot_t pgprot_default;
 
 #define _MOD_PROT(p, b)		__pgprot_modify(p, 0, b)
 
-#define PAGE_NONE		__pgprot_modify(pgprot_default, PTE_TYPE_MASK, PTE_PROT_NONE | PTE_RDONLY | PTE_PXN | PTE_UXN)
-#define PAGE_SHARED		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_UXN)
-#define PAGE_SHARED_EXEC	_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN)
-#define PAGE_COPY		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_UXN | PTE_RDONLY)
-#define PAGE_COPY_EXEC		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_RDONLY)
-#define PAGE_READONLY		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_UXN | PTE_RDONLY)
-#define PAGE_READONLY_EXEC	_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_RDONLY)
-#define PAGE_KERNEL		_MOD_PROT(pgprot_default, PTE_PXN | PTE_UXN | PTE_DIRTY)
-#define PAGE_KERNEL_EXEC	_MOD_PROT(pgprot_default, PTE_UXN | PTE_DIRTY)
+#define PAGE_NONE		__pgprot_modify(pgprot_default, PTE_TYPE_MASK, PTE_PROT_NONE | PTE_PXN | PTE_UXN)
+#define PAGE_SHARED		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_UXN | PTE_WRITE)
+#define PAGE_SHARED_EXEC	_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_WRITE)
+#define PAGE_COPY		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_UXN)
+#define PAGE_COPY_EXEC		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN)
+#define PAGE_READONLY		_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN | PTE_UXN)
+#define PAGE_READONLY_EXEC	_MOD_PROT(pgprot_default, PTE_USER | PTE_NG | PTE_PXN)
+#define PAGE_KERNEL		_MOD_PROT(pgprot_default, PTE_PXN | PTE_UXN | PTE_DIRTY | PTE_WRITE)
+#define PAGE_KERNEL_EXEC	_MOD_PROT(pgprot_default, PTE_UXN | PTE_DIRTY | PTE_WRITE)
+
+#define PAGE_HYP		_MOD_PROT(pgprot_default, PTE_HYP)
+#define PAGE_HYP_DEVICE		__pgprot(PROT_DEVICE_nGnRE | PTE_HYP)
+
+#define PAGE_S2			__pgprot_modify(pgprot_default, PTE_S2_MEMATTR_MASK, PTE_S2_MEMATTR(MT_S2_NORMAL) | PTE_S2_RDONLY)
+#define PAGE_S2_DEVICE		__pgprot(PROT_DEFAULT | PTE_S2_MEMATTR(MT_S2_DEVICE_nGnRE) | PTE_S2_RDWR | PTE_UXN)
 
 #define __PAGE_NONE		__pgprot(((_PAGE_DEFAULT) & ~PTE_TYPE_MASK) | PTE_PROT_NONE | PTE_RDONLY | PTE_PXN | PTE_UXN)
 #define __PAGE_SHARED		__pgprot(_PAGE_DEFAULT | PTE_USER | PTE_NG | PTE_PXN | PTE_UXN)
@@ -131,26 +141,57 @@ extern struct page *empty_zero_page;
 /*
  * The following only work if pte_present(). Undefined behaviour otherwise.
  */
-#define pte_present(pte)	(pte_val(pte) & (PTE_VALID | PTE_PROT_NONE))
-#define pte_dirty(pte)		(pte_val(pte) & PTE_DIRTY)
-#define pte_young(pte)		(pte_val(pte) & PTE_AF)
-#define pte_special(pte)	(pte_val(pte) & PTE_SPECIAL)
-#define pte_write(pte)		(!(pte_val(pte) & PTE_RDONLY))
+#define pte_present(pte)	(!!(pte_val(pte) & (PTE_VALID | PTE_PROT_NONE)))
+#define pte_dirty(pte)		(!!(pte_val(pte) & PTE_DIRTY))
+#define pte_young(pte)		(!!(pte_val(pte) & PTE_AF))
+#define pte_special(pte)	(!!(pte_val(pte) & PTE_SPECIAL))
+#define pte_write(pte)		(!!(pte_val(pte) & PTE_WRITE))
 #define pte_exec(pte)		(!(pte_val(pte) & PTE_UXN))
 
 #define pte_valid_user(pte) \
 	((pte_val(pte) & (PTE_VALID | PTE_USER)) == (PTE_VALID | PTE_USER))
 
-#define PTE_BIT_FUNC(fn,op) \
-static inline pte_t pte_##fn(pte_t pte) { pte_val(pte) op; return pte; }
+static inline pte_t pte_wrprotect(pte_t pte)
+{
+	pte_val(pte) &= ~PTE_WRITE;
+	return pte;
+}
 
-PTE_BIT_FUNC(wrprotect, |= PTE_RDONLY);
-PTE_BIT_FUNC(mkwrite,   &= ~PTE_RDONLY);
-PTE_BIT_FUNC(mkclean,   &= ~PTE_DIRTY);
-PTE_BIT_FUNC(mkdirty,   |= PTE_DIRTY);
-PTE_BIT_FUNC(mkold,     &= ~PTE_AF);
-PTE_BIT_FUNC(mkyoung,   |= PTE_AF);
-PTE_BIT_FUNC(mkspecial, |= PTE_SPECIAL);
+static inline pte_t pte_mkwrite(pte_t pte)
+{
+	pte_val(pte) |= PTE_WRITE;
+	return pte;
+}
+
+static inline pte_t pte_mkclean(pte_t pte)
+{
+	pte_val(pte) &= ~PTE_DIRTY;
+	return pte;
+}
+
+static inline pte_t pte_mkdirty(pte_t pte)
+{
+	pte_val(pte) |= PTE_DIRTY;
+	return pte;
+}
+
+static inline pte_t pte_mkold(pte_t pte)
+{
+	pte_val(pte) &= ~PTE_AF;
+	return pte;
+}
+
+static inline pte_t pte_mkyoung(pte_t pte)
+{
+	pte_val(pte) |= PTE_AF;
+	return pte;
+}
+
+static inline pte_t pte_mkspecial(pte_t pte)
+{
+	pte_val(pte) |= PTE_SPECIAL;
+	return pte;
+}
 
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
@@ -163,10 +204,12 @@ static inline void set_pte_at(struct mm_struct *mm, unsigned long addr,
 			      pte_t *ptep, pte_t pte)
 {
 	if (pte_valid_user(pte)) {
-		if (pte_exec(pte))
+		if (!pte_special(pte) && pte_exec(pte))
 			__sync_icache_dcache(pte, addr);
-		if (!pte_dirty(pte))
-			pte = pte_wrprotect(pte);
+		if (pte_dirty(pte) && pte_write(pte))
+			pte_val(pte) &= ~PTE_RDONLY;
+		else
+			pte_val(pte) |= PTE_RDONLY;
 	}
 
 	set_pte(ptep, pte);
@@ -189,36 +232,36 @@ static inline void set_pte_at(struct mm_struct *mm, unsigned long addr,
 
 #define __HAVE_ARCH_PTE_SPECIAL
 
-/*
- * Software PMD bits for THP
- */
+static inline pte_t pmd_pte(pmd_t pmd)
+{
+	return __pte(pmd_val(pmd));
+}
 
-#define PMD_SECT_DIRTY		(_AT(pmdval_t, 1) << 55)
-#define PMD_SECT_SPLITTING	(_AT(pmdval_t, 1) << 57)
+static inline pmd_t pte_pmd(pte_t pte)
+{
+	return __pmd(pte_val(pte));
+}
 
 /*
  * THP definitions.
  */
-#define pmd_young(pmd)		(pmd_val(pmd) & PMD_SECT_AF)
-
-#define __HAVE_ARCH_PMD_WRITE
-#define pmd_write(pmd)		(!(pmd_val(pmd) & PMD_SECT_RDONLY))
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 #define pmd_trans_huge(pmd)	(pmd_val(pmd) && !(pmd_val(pmd) & PMD_TABLE_BIT))
-#define pmd_trans_splitting(pmd) (pmd_val(pmd) & PMD_SECT_SPLITTING)
+#define pmd_trans_splitting(pmd)	pte_special(pmd_pte(pmd))
 #endif
 
-#define PMD_BIT_FUNC(fn,op) \
-static inline pmd_t pmd_##fn(pmd_t pmd) { pmd_val(pmd) op; return pmd; }
+#define pmd_young(pmd)		pte_young(pmd_pte(pmd))
+#define pmd_wrprotect(pmd)	pte_pmd(pte_wrprotect(pmd_pte(pmd)))
+#define pmd_mksplitting(pmd)	pte_pmd(pte_mkspecial(pmd_pte(pmd)))
+#define pmd_mkold(pmd)		pte_pmd(pte_mkold(pmd_pte(pmd)))
+#define pmd_mkwrite(pmd)	pte_pmd(pte_mkwrite(pmd_pte(pmd)))
+#define pmd_mkdirty(pmd)	pte_pmd(pte_mkdirty(pmd_pte(pmd)))
+#define pmd_mkyoung(pmd)	pte_pmd(pte_mkyoung(pmd_pte(pmd)))
+#define pmd_mknotpresent(pmd)	(__pmd(pmd_val(pmd) & ~PMD_TYPE_MASK))
 
-PMD_BIT_FUNC(wrprotect,	|= PMD_SECT_RDONLY);
-PMD_BIT_FUNC(mkold,	&= ~PMD_SECT_AF);
-PMD_BIT_FUNC(mksplitting, |= PMD_SECT_SPLITTING);
-PMD_BIT_FUNC(mkwrite,   &= ~PMD_SECT_RDONLY);
-PMD_BIT_FUNC(mkdirty,   |= PMD_SECT_DIRTY);
-PMD_BIT_FUNC(mkyoung,   |= PMD_SECT_AF);
-PMD_BIT_FUNC(mknotpresent, &= ~PMD_TYPE_MASK);
+#define __HAVE_ARCH_PMD_WRITE
+#define pmd_write(pmd)		pte_write(pmd_pte(pmd))
 
 #define pmd_mkhuge(pmd)		(__pmd(pmd_val(pmd) & ~PMD_TABLE_BIT))
 
@@ -228,16 +271,7 @@ PMD_BIT_FUNC(mknotpresent, &= ~PMD_TYPE_MASK);
 
 #define pmd_page(pmd)           pfn_to_page(__phys_to_pfn(pmd_val(pmd) & PHYS_MASK))
 
-static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
-{
-	const pmdval_t mask = PMD_SECT_USER | PMD_SECT_PXN | PMD_SECT_UXN |
-			      PMD_SECT_RDONLY | PMD_SECT_PROT_NONE |
-			      PMD_SECT_VALID;
-	pmd_val(pmd) = (pmd_val(pmd) & ~mask) | (pgprot_val(newprot) & mask);
-	return pmd;
-}
-
-#define set_pmd_at(mm, addr, pmdp, pmd)	set_pmd(pmdp, pmd)
+#define set_pmd_at(mm, addr, pmdp, pmd)	set_pte_at(mm, addr, (pte_t *)pmdp, pmd_pte(pmd))
 
 static inline int has_transparent_hugepage(void)
 {
@@ -248,11 +282,11 @@ static inline int has_transparent_hugepage(void)
  * Mark the prot value as uncacheable and unbufferable.
  */
 #define pgprot_noncached(prot) \
-	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_DEVICE_nGnRnE))
+	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_DEVICE_nGnRnE) | PTE_PXN | PTE_UXN)
 #define pgprot_writecombine(prot) \
-	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_DEVICE_GRE))
+	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
 #define pgprot_dmacoherent(prot) \
-	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_NORMAL_NC))
+	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
 #define __HAVE_PHYS_MEM_ACCESS_PROT
 struct file;
 extern pgprot_t phys_mem_access_prot(struct file *file, unsigned long pfn,
@@ -287,6 +321,8 @@ static inline pte_t *pmd_page_vaddr(pmd_t pmd)
  */
 #define mk_pte(page,prot)	pfn_pte(page_to_pfn(page),prot)
 
+#ifndef CONFIG_ARM64_64K_PAGES
+
 #define pud_none(pud)		(!pud_val(pud))
 #define pud_bad(pud)		(!(pud_val(pud) & 2))
 #define pud_present(pud)	(pud_val(pud))
@@ -307,27 +343,7 @@ static inline pmd_t *pud_page_vaddr(pud_t pud)
 	return __va(pud_val(pud) & PHYS_MASK & (s32)PAGE_MASK);
 }
 
-#define pgd_none(pgd)		(!pgd_val(pgd))
-#define pgd_present(pgd)	(pgd_val(pgd))
-#define pgd_bad(pgd)		(!(pgd_val(pgd) & 2))
-
-#ifndef CONFIG_ARM64_64K_PAGES
-static inline void set_pgd(pgd_t *pgdp, pgd_t pgd)
-{
-	*pgdp = pgd;
-	dsb();
-}
-
-static inline void pgd_clear(pgd_t *pgdp)
-{
-	set_pgd(pgdp, __pgd(0));
-}
-
-static inline pud_t *pgd_page_vaddr(pgd_t pgd)
-{
-	return __va(pgd_val(pgd) & PHYS_MASK & (s32)PAGE_MASK);
-}
-#endif
+#endif	/* CONFIG_ARM64_64K_PAGES */
 
 /* to find an entry in a page-table-directory */
 #define pgd_index(addr)		(((addr) >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1))
@@ -336,27 +352,13 @@ static inline pud_t *pgd_page_vaddr(pgd_t pgd)
 
 /* to find an entry in a kernel page-table-directory */
 #define pgd_offset_k(addr)	pgd_offset(&init_mm, addr)
-
-#ifndef CONFIG_ARM64_64K_PAGES
-/* Find an entry in the kernel page upper directory */
-#define pud_index(addr)		(((addr) >> PUD_SHIFT) & (PTRS_PER_PUD - 1))
-
-static inline pud_t *pud_offset(pud_t *pud, unsigned long addr)
-{
-	return (pud_t *)pgd_page_vaddr(*pud) + pud_index(addr);
-}
+#ifdef CONFIG_PAX_KERNEXEC
+#define pgd_offset_pax(addr)	(swapper_pg_dir_pax+pgd_index(addr))
 #endif
 
 /* Find an entry in the second-level page table.. */
-#define pmd_index(addr)		(((addr) >> PMD_SHIFT) & (PTRS_PER_PMD - 1))
-
 #ifndef CONFIG_ARM64_64K_PAGES
-static inline pmd_t *pmd_offset(pud_t *pmd, unsigned long addr)
-{
-	return (pmd_t *)pud_page_vaddr(*pmd) + pmd_index(addr);
-}
-
-#else
+#define pmd_index(addr)		(((addr) >> PMD_SHIFT) & (PTRS_PER_PMD - 1))
 static inline pmd_t *pmd_offset(pud_t *pud, unsigned long addr)
 {
 	return (pmd_t *)pud_page_vaddr(*pud) + pmd_index(addr);
@@ -369,31 +371,41 @@ static inline pmd_t *pmd_offset(pud_t *pud, unsigned long addr)
 static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 {
 	const pteval_t mask = PTE_USER | PTE_PXN | PTE_UXN | PTE_RDONLY |
-			      PTE_PROT_NONE | PTE_VALID;
+			      PTE_PROT_NONE | PTE_WRITE | PTE_TYPE_MASK;
 	pte_val(pte) = (pte_val(pte) & ~mask) | (pgprot_val(newprot) & mask);
 	return pte;
 }
 
+static inline pmd_t pmd_modify(pmd_t pmd, pgprot_t newprot)
+{
+	return pte_pmd(pte_modify(pmd_pte(pmd), newprot));
+}
+
 extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
+#ifdef CONFIG_PAX_KERNEXEC
+extern pgd_t swapper_pg_dir_pax[PTRS_PER_PGD];
+#endif
 extern pgd_t idmap_pg_dir[PTRS_PER_PGD];
 
-#define SWAPPER_DIR_SIZE	(4 * PAGE_SIZE)
-#define IDMAP_DIR_SIZE		(3 * PAGE_SIZE)
+#define SWAPPER_DIR_SIZE	(3 * PAGE_SIZE)
+#define IDMAP_DIR_SIZE		(2 * PAGE_SIZE)
 
 /*
  * Encode and decode a swap entry:
- *	bits 0, 2:	present (must both be zero)
- *	bit  1:		PTE_FILE
+ *	bits 0-1:	present (must be zero)
+ *	bit  2:		PTE_FILE
  *	bits 3-8:	swap type
- *	bits 9-63:	swap offset
+ *	bits 9-57:	swap offset
  */
 #define __SWP_TYPE_SHIFT	3
 #define __SWP_TYPE_BITS		6
+#define __SWP_OFFSET_BITS	49
 #define __SWP_TYPE_MASK		((1 << __SWP_TYPE_BITS) - 1)
 #define __SWP_OFFSET_SHIFT	(__SWP_TYPE_BITS + __SWP_TYPE_SHIFT)
+#define __SWP_OFFSET_MASK	((1UL << __SWP_OFFSET_BITS) - 1)
 
 #define __swp_type(x)		(((x).val >> __SWP_TYPE_SHIFT) & __SWP_TYPE_MASK)
-#define __swp_offset(x)		((x).val >> __SWP_OFFSET_SHIFT)
+#define __swp_offset(x)		(((x).val >> __SWP_OFFSET_SHIFT) & __SWP_OFFSET_MASK)
 #define __swp_entry(type,offset) ((swp_entry_t) { ((type) << __SWP_TYPE_SHIFT) | ((offset) << __SWP_OFFSET_SHIFT) })
 
 #define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
@@ -401,23 +413,28 @@ extern pgd_t idmap_pg_dir[PTRS_PER_PGD];
 
 /*
  * Ensure that there are not more swap files than can be encoded in the kernel
- * the PTEs.
+ * PTEs.
  */
 #define MAX_SWAPFILES_CHECK() BUILD_BUG_ON(MAX_SWAPFILES_SHIFT > __SWP_TYPE_BITS)
 
 /*
  * Encode and decode a file entry:
- *	bits 0, 2:	present (must both be zero)
- *	bit  1:		PTE_FILE
- *	bits 3-63:	file offset / PAGE_SIZE
+ *	bits 0-1:	present (must be zero)
+ *	bit  2:		PTE_FILE
+ *	bits 3-57:	file offset / PAGE_SIZE
  */
 #define pte_file(pte)		(pte_val(pte) & PTE_FILE)
 #define pte_to_pgoff(x)		(pte_val(x) >> 3)
 #define pgoff_to_pte(x)		__pte(((x) << 3) | PTE_FILE)
 
-#define PTE_FILE_MAX_BITS	61
+#define PTE_FILE_MAX_BITS	55
 
 extern int kern_addr_valid(unsigned long addr);
+
+#ifdef CONFIG_PAX_KERNEXEC
+#define  __HAVE_ARCH_PAX_OPEN_KERNEL
+#define  __HAVE_ARCH_PAX_CLOSE_KERNEL
+#endif
 
 #include <asm-generic/pgtable.h>
 
@@ -429,6 +446,74 @@ extern int kern_addr_valid(unsigned long addr);
 		remap_pfn_range(vma, from, pfn, size, prot)
 
 #define pgtable_cache_init() do { } while (0)
+
+#ifdef CONFIG_PAX_KERNEXEC
+#define  __HAVE_ARCH_PAX_OPEN_KERNEL
+#define  __HAVE_ARCH_PAX_CLOSE_KERNEL
+
+#include <linux/preempt.h>
+#include <linux/percpu.h>
+
+extern unsigned int pax_ttbr1;
+extern unsigned long pax_set_ttbr1_to_rwx;
+
+static inline unsigned long pax_set_rwx_pgd(void) {
+	
+	unsigned long ttbr;
+	ttbr = __pa(swapper_pg_dir_pax);
+
+	this_cpu_add(pax_set_ttbr1_to_rwx, 1);
+	
+	asm(
+	"	msr	ttbr1_el1, %0			// set TTBR1\n"
+	"	isb"
+	:
+	: "r" (ttbr));
+
+	/* flush all tlb entries */	
+	dsb();
+	asm("tlbi	vmalle1is");
+	dsb();
+	isb();
+
+	return 0;
+}
+
+static inline unsigned long pax_set_rx_pgd(void) {
+	
+	unsigned long ttbr;
+	ttbr = __pa(swapper_pg_dir);
+
+	asm(
+	"	msr	ttbr1_el1, %0			// set TTBR1\n"
+	"	isb"
+	:
+	: "r" (ttbr));
+	
+	/* flush all tlb entries */	
+	dsb();
+	asm("tlbi	vmalle1is");
+	dsb();
+	isb();
+
+	this_cpu_sub(pax_set_ttbr1_to_rwx, 1);
+	return 0;
+}
+
+static inline unsigned long pax_open_kernel(void) 
+{
+	preempt_disable();
+	pax_set_rwx_pgd();
+	return 0;
+}
+
+static inline unsigned long pax_close_kernel(void) 
+{
+	pax_set_rx_pgd();
+	preempt_enable_no_resched();
+	return 0;
+}
+#endif
 
 #endif /* !__ASSEMBLY__ */
 

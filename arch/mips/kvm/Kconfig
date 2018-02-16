@@ -50,9 +50,13 @@ config KVM_MIPS_DEBUG_COP0_COUNTERS
 
 config KVM_MIPS_VZ
 	bool "Kernel-based Virtual Machine (KVM) using hardware MIPS-VZ support"
-	depends on HAVE_KVM && !FAST_ACCESS_TO_THREAD_POINTER
+	depends on HAVE_KVM
 	select KVM
 	select EXPORT_UASM
+	select HAVE_KVM_MSI
+	select HAVE_KVM_IRQ_ROUTING
+	select HAVE_KVM_IRQCHIP
+	select HAVE_KVM_EVENTFD
 	---help---
 	  Support for hosting Guest kernels on hardware with the
 	  MIPS-VZ hardware module.

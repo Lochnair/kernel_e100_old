@@ -10,6 +10,8 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/of.h>
+#include <linux/of_pci.h>
 #include <linux/pci.h>
 #include <linux/pm.h>
 #include <linux/slab.h>
@@ -17,6 +19,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/log2.h>
+#include <linux/of_pci.h>
 #include <linux/pci-aspm.h>
 #include <linux/pm_wakeup.h>
 #include <linux/interrupt.h>
@@ -656,6 +659,28 @@ static int pci_platform_power_transition(struct pci_dev *dev, pci_power_t state)
 }
 
 /**
+ * pci_wakeup - Wake up a PCI device
+ * @pci_dev: Device to handle.
+ * @ign: ignored parameter
+ */
+static int pci_wakeup(struct pci_dev *pci_dev, void *ign)
+{
+	pci_wakeup_event(pci_dev);
+	pm_request_resume(&pci_dev->dev);
+	return 0;
+}
+
+/**
+ * pci_wakeup_bus - Walk given bus and wake up devices on it
+ * @bus: Top bus of the subtree to walk.
+ */
+static void pci_wakeup_bus(struct pci_bus *bus)
+{
+	if (bus)
+		pci_walk_bus(bus, pci_wakeup, NULL);
+}
+
+/**
  * __pci_start_power_transition - Start power transition of a PCI device
  * @dev: PCI device to handle.
  * @state: State to put the device into.
@@ -834,8 +859,8 @@ EXPORT_SYMBOL(pci_choose_state);
 #define PCI_EXP_SAVE_REGS	7
 
 
-static struct pci_cap_saved_state *pci_find_saved_cap(
-	struct pci_dev *pci_dev, char cap)
+static struct pci_cap_saved_state *pci_find_saved_cap(struct pci_dev *pci_dev,
+						      char cap)
 {
 	struct pci_cap_saved_state *tmp;
 
@@ -1070,7 +1095,8 @@ EXPORT_SYMBOL_GPL(pci_store_saved_state);
  * @dev: PCI device that we're dealing with
  * @state: Saved state returned from pci_store_saved_state()
  */
-int pci_load_saved_state(struct pci_dev *dev, struct pci_saved_state *state)
+static int pci_load_saved_state(struct pci_dev *dev,
+				struct pci_saved_state *state)
 {
 	struct pci_cap_saved_data *cap;
 
@@ -1098,7 +1124,6 @@ int pci_load_saved_state(struct pci_dev *dev, struct pci_saved_state *state)
 	dev->state_saved = true;
 	return 0;
 }
-EXPORT_SYMBOL_GPL(pci_load_saved_state);
 
 /**
  * pci_load_and_free_saved_state - Reload the save state pointed to by state,
@@ -1116,9 +1141,16 @@ int pci_load_and_free_saved_state(struct pci_dev *dev,
 }
 EXPORT_SYMBOL_GPL(pci_load_and_free_saved_state);
 
+int __weak pcibios_enable_device(struct pci_dev *dev, int bars)
+{
+	return pci_enable_resources(dev, bars);
+}
+
 static int do_pci_enable_device(struct pci_dev *dev, int bars)
 {
 	int err;
+	u16 cmd;
+	u8 pin;
 
 	err = pci_set_power_state(dev, PCI_D0);
 	if (err < 0 && err != -EIO)
@@ -1127,6 +1159,17 @@ static int do_pci_enable_device(struct pci_dev *dev, int bars)
 	if (err < 0)
 		return err;
 	pci_fixup_device(pci_fixup_enable, dev);
+
+	if (dev->msi_enabled || dev->msix_enabled)
+		return 0;
+
+	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin);
+	if (pin) {
+		pci_read_config_word(dev, PCI_COMMAND, &cmd);
+		if (cmd & PCI_COMMAND_INTX_DISABLE)
+			pci_write_config_word(dev, PCI_COMMAND,
+					      cmd & ~PCI_COMMAND_INTX_DISABLE);
+	}
 
 	return 0;
 }
@@ -1143,6 +1186,24 @@ int pci_reenable_device(struct pci_dev *dev)
 	if (pci_is_enabled(dev))
 		return do_pci_enable_device(dev, (1 << PCI_NUM_RESOURCES) - 1);
 	return 0;
+}
+
+static void pci_enable_bridge(struct pci_dev *dev)
+{
+	int retval;
+
+	if (!dev)
+		return;
+
+	pci_enable_bridge(dev->bus->self);
+
+	if (pci_is_enabled(dev))
+		return;
+	retval = pci_enable_device(dev);
+	if (retval)
+		dev_err(&dev->dev, "Error enabling bridge (%d), continuing\n",
+			retval);
+	pci_set_master(dev);
 }
 
 static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags)
@@ -1164,6 +1225,8 @@ static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags)
 
 	if (atomic_inc_return(&dev->enable_cnt) > 1)
 		return 0;		/* already enabled */
+
+	pci_enable_bridge(dev->bus->self);
 
 	/* only skip sriov related */
 	for (i = 0; i <= PCI_ROM_RESOURCE; i++)
@@ -1331,6 +1394,9 @@ void pcim_pin_device(struct pci_dev *pdev)
  */
 int __weak pcibios_add_device (struct pci_dev *dev)
 {
+#ifdef CONFIG_OF
+	dev->irq = of_irq_parse_and_map_pci(dev, 0, 0);
+#endif
 	return 0;
 }
 
@@ -1493,27 +1559,6 @@ void pci_pme_wakeup_bus(struct pci_bus *bus)
 		pci_walk_bus(bus, pci_pme_wakeup, (void *)true);
 }
 
-/**
- * pci_wakeup - Wake up a PCI device
- * @pci_dev: Device to handle.
- * @ign: ignored parameter
- */
-static int pci_wakeup(struct pci_dev *pci_dev, void *ign)
-{
-	pci_wakeup_event(pci_dev);
-	pm_request_resume(&pci_dev->dev);
-	return 0;
-}
-
-/**
- * pci_wakeup_bus - Walk given bus and wake up devices on it
- * @bus: Top bus of the subtree to walk.
- */
-void pci_wakeup_bus(struct pci_bus *bus)
-{
-	if (bus)
-		pci_walk_bus(bus, pci_wakeup, NULL);
-}
 
 /**
  * pci_pme_capable - check the capability of PCI device to generate PME#
@@ -1726,7 +1771,7 @@ int pci_wake_from_d3(struct pci_dev *dev, bool enable)
  * If the platform can't manage @dev, return the deepest state from which it
  * can generate wake events, based on any available PME info.
  */
-pci_power_t pci_target_state(struct pci_dev *dev)
+static pci_power_t pci_target_state(struct pci_dev *dev)
 {
 	pci_power_t target_state = PCI_D3hot;
 
@@ -2070,239 +2115,6 @@ void pci_configure_ari(struct pci_dev *dev)
 		bridge->ari_enabled = 0;
 	}
 }
-
-/**
- * pci_enable_ido - enable ID-based Ordering on a device
- * @dev: the PCI device
- * @type: which types of IDO to enable
- *
- * Enable ID-based ordering on @dev.  @type can contain the bits
- * %PCI_EXP_IDO_REQUEST and/or %PCI_EXP_IDO_COMPLETION to indicate
- * which types of transactions are allowed to be re-ordered.
- */
-void pci_enable_ido(struct pci_dev *dev, unsigned long type)
-{
-	u16 ctrl = 0;
-
-	if (type & PCI_EXP_IDO_REQUEST)
-		ctrl |= PCI_EXP_IDO_REQ_EN;
-	if (type & PCI_EXP_IDO_COMPLETION)
-		ctrl |= PCI_EXP_IDO_CMP_EN;
-	if (ctrl)
-		pcie_capability_set_word(dev, PCI_EXP_DEVCTL2, ctrl);
-}
-EXPORT_SYMBOL(pci_enable_ido);
-
-/**
- * pci_disable_ido - disable ID-based ordering on a device
- * @dev: the PCI device
- * @type: which types of IDO to disable
- */
-void pci_disable_ido(struct pci_dev *dev, unsigned long type)
-{
-	u16 ctrl = 0;
-
-	if (type & PCI_EXP_IDO_REQUEST)
-		ctrl |= PCI_EXP_IDO_REQ_EN;
-	if (type & PCI_EXP_IDO_COMPLETION)
-		ctrl |= PCI_EXP_IDO_CMP_EN;
-	if (ctrl)
-		pcie_capability_clear_word(dev, PCI_EXP_DEVCTL2, ctrl);
-}
-EXPORT_SYMBOL(pci_disable_ido);
-
-/**
- * pci_enable_obff - enable optimized buffer flush/fill
- * @dev: PCI device
- * @type: type of signaling to use
- *
- * Try to enable @type OBFF signaling on @dev.  It will try using WAKE#
- * signaling if possible, falling back to message signaling only if
- * WAKE# isn't supported.  @type should indicate whether the PCIe link
- * be brought out of L0s or L1 to send the message.  It should be either
- * %PCI_EXP_OBFF_SIGNAL_ALWAYS or %PCI_OBFF_SIGNAL_L0.
- *
- * If your device can benefit from receiving all messages, even at the
- * power cost of bringing the link back up from a low power state, use
- * %PCI_EXP_OBFF_SIGNAL_ALWAYS.  Otherwise, use %PCI_OBFF_SIGNAL_L0 (the
- * preferred type).
- *
- * RETURNS:
- * Zero on success, appropriate error number on failure.
- */
-int pci_enable_obff(struct pci_dev *dev, enum pci_obff_signal_type type)
-{
-	u32 cap;
-	u16 ctrl;
-	int ret;
-
-	pcie_capability_read_dword(dev, PCI_EXP_DEVCAP2, &cap);
-	if (!(cap & PCI_EXP_OBFF_MASK))
-		return -ENOTSUPP; /* no OBFF support at all */
-
-	/* Make sure the topology supports OBFF as well */
-	if (dev->bus->self) {
-		ret = pci_enable_obff(dev->bus->self, type);
-		if (ret)
-			return ret;
-	}
-
-	pcie_capability_read_word(dev, PCI_EXP_DEVCTL2, &ctrl);
-	if (cap & PCI_EXP_OBFF_WAKE)
-		ctrl |= PCI_EXP_OBFF_WAKE_EN;
-	else {
-		switch (type) {
-		case PCI_EXP_OBFF_SIGNAL_L0:
-			if (!(ctrl & PCI_EXP_OBFF_WAKE_EN))
-				ctrl |= PCI_EXP_OBFF_MSGA_EN;
-			break;
-		case PCI_EXP_OBFF_SIGNAL_ALWAYS:
-			ctrl &= ~PCI_EXP_OBFF_WAKE_EN;
-			ctrl |= PCI_EXP_OBFF_MSGB_EN;
-			break;
-		default:
-			WARN(1, "bad OBFF signal type\n");
-			return -ENOTSUPP;
-		}
-	}
-	pcie_capability_write_word(dev, PCI_EXP_DEVCTL2, ctrl);
-
-	return 0;
-}
-EXPORT_SYMBOL(pci_enable_obff);
-
-/**
- * pci_disable_obff - disable optimized buffer flush/fill
- * @dev: PCI device
- *
- * Disable OBFF on @dev.
- */
-void pci_disable_obff(struct pci_dev *dev)
-{
-	pcie_capability_clear_word(dev, PCI_EXP_DEVCTL2, PCI_EXP_OBFF_WAKE_EN);
-}
-EXPORT_SYMBOL(pci_disable_obff);
-
-/**
- * pci_ltr_supported - check whether a device supports LTR
- * @dev: PCI device
- *
- * RETURNS:
- * True if @dev supports latency tolerance reporting, false otherwise.
- */
-static bool pci_ltr_supported(struct pci_dev *dev)
-{
-	u32 cap;
-
-	pcie_capability_read_dword(dev, PCI_EXP_DEVCAP2, &cap);
-
-	return cap & PCI_EXP_DEVCAP2_LTR;
-}
-
-/**
- * pci_enable_ltr - enable latency tolerance reporting
- * @dev: PCI device
- *
- * Enable LTR on @dev if possible, which means enabling it first on
- * upstream ports.
- *
- * RETURNS:
- * Zero on success, errno on failure.
- */
-int pci_enable_ltr(struct pci_dev *dev)
-{
-	int ret;
-
-	/* Only primary function can enable/disable LTR */
-	if (PCI_FUNC(dev->devfn) != 0)
-		return -EINVAL;
-
-	if (!pci_ltr_supported(dev))
-		return -ENOTSUPP;
-
-	/* Enable upstream ports first */
-	if (dev->bus->self) {
-		ret = pci_enable_ltr(dev->bus->self);
-		if (ret)
-			return ret;
-	}
-
-	return pcie_capability_set_word(dev, PCI_EXP_DEVCTL2, PCI_EXP_LTR_EN);
-}
-EXPORT_SYMBOL(pci_enable_ltr);
-
-/**
- * pci_disable_ltr - disable latency tolerance reporting
- * @dev: PCI device
- */
-void pci_disable_ltr(struct pci_dev *dev)
-{
-	/* Only primary function can enable/disable LTR */
-	if (PCI_FUNC(dev->devfn) != 0)
-		return;
-
-	if (!pci_ltr_supported(dev))
-		return;
-
-	pcie_capability_clear_word(dev, PCI_EXP_DEVCTL2, PCI_EXP_LTR_EN);
-}
-EXPORT_SYMBOL(pci_disable_ltr);
-
-static int __pci_ltr_scale(int *val)
-{
-	int scale = 0;
-
-	while (*val > 1023) {
-		*val = (*val + 31) / 32;
-		scale++;
-	}
-	return scale;
-}
-
-/**
- * pci_set_ltr - set LTR latency values
- * @dev: PCI device
- * @snoop_lat_ns: snoop latency in nanoseconds
- * @nosnoop_lat_ns: nosnoop latency in nanoseconds
- *
- * Figure out the scale and set the LTR values accordingly.
- */
-int pci_set_ltr(struct pci_dev *dev, int snoop_lat_ns, int nosnoop_lat_ns)
-{
-	int pos, ret, snoop_scale, nosnoop_scale;
-	u16 val;
-
-	if (!pci_ltr_supported(dev))
-		return -ENOTSUPP;
-
-	snoop_scale = __pci_ltr_scale(&snoop_lat_ns);
-	nosnoop_scale = __pci_ltr_scale(&nosnoop_lat_ns);
-
-	if (snoop_lat_ns > PCI_LTR_VALUE_MASK ||
-	    nosnoop_lat_ns > PCI_LTR_VALUE_MASK)
-		return -EINVAL;
-
-	if ((snoop_scale > (PCI_LTR_SCALE_MASK >> PCI_LTR_SCALE_SHIFT)) ||
-	    (nosnoop_scale > (PCI_LTR_SCALE_MASK >> PCI_LTR_SCALE_SHIFT)))
-		return -EINVAL;
-
-	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_LTR);
-	if (!pos)
-		return -ENOTSUPP;
-
-	val = (snoop_scale << PCI_LTR_SCALE_SHIFT) | snoop_lat_ns;
-	ret = pci_write_config_word(dev, pos + PCI_LTR_MAX_SNOOP_LAT, val);
-	if (ret != 4)
-		return -EIO;
-
-	val = (nosnoop_scale << PCI_LTR_SCALE_SHIFT) | nosnoop_lat_ns;
-	ret = pci_write_config_word(dev, pos + PCI_LTR_MAX_NOSNOOP_LAT, val);
-	if (ret != 4)
-		return -EIO;
-
-	return 0;
-}
-EXPORT_SYMBOL(pci_set_ltr);
 
 static int pci_acs_enable;
 
@@ -2705,6 +2517,39 @@ int pci_request_regions_exclusive(struct pci_dev *pdev, const char *res_name)
 {
 	return pci_request_selected_regions_exclusive(pdev,
 					((1 << 6) - 1), res_name);
+}
+
+/**
+ *	pci_remap_iospace - Remap the memory mapped I/O space
+ *	@res: Resource describing the I/O space
+ *	@phys_addr: physical address where the range will be mapped.
+ *
+ *	Remap the memory mapped I/O space described by the @res
+ *	into the CPU physical address space. Only architectures
+ *	that have memory mapped IO defined (and hence PCI_IOBASE)
+ *	should call this function.
+ */
+int __weak pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr)
+{
+	int err = -ENODEV;
+
+#ifdef PCI_IOBASE
+	if (!(res->flags & IORESOURCE_IO))
+		return -EINVAL;
+
+	if (res->end > IO_SPACE_LIMIT)
+		return -EINVAL;
+
+	err = ioremap_page_range(res->start + (unsigned long)PCI_IOBASE,
+				res->end + 1 + (unsigned long)PCI_IOBASE,
+				phys_addr, __pgprot(PROT_DEVICE_nGnRE));
+#else
+	/* this architecture does not have memory mapped I/O space,
+	   so this function should never be called */
+	WARN_ON(1);
+#endif
+
+	return err;
 }
 
 static void __pci_set_master(struct pci_dev *dev, bool enable)
@@ -3569,6 +3414,49 @@ int pcie_set_mps(struct pci_dev *dev, int mps)
 }
 
 /**
+ * pcie_get_minimum_link - determine minimum link settings of a PCI device
+ * @dev: PCI device to query
+ * @speed: storage for minimum speed
+ * @width: storage for minimum width
+ *
+ * This function will walk up the PCI device chain and determine the minimum
+ * link width and speed of the device.
+ */
+int pcie_get_minimum_link(struct pci_dev *dev, enum pci_bus_speed *speed,
+			  enum pcie_link_width *width)
+{
+	int ret;
+
+	*speed = PCI_SPEED_UNKNOWN;
+	*width = PCIE_LNK_WIDTH_UNKNOWN;
+
+	while (dev) {
+		u16 lnksta;
+		enum pci_bus_speed next_speed;
+		enum pcie_link_width next_width;
+
+		ret = pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta);
+		if (ret)
+			return ret;
+
+		next_speed = pcie_link_speed[lnksta & PCI_EXP_LNKSTA_CLS];
+		next_width = (lnksta & PCI_EXP_LNKSTA_NLW) >>
+			PCI_EXP_LNKSTA_NLW_SHIFT;
+
+		if (next_speed < *speed)
+			*speed = next_speed;
+
+		if (next_width < *width)
+			*width = next_width;
+
+		dev = dev->bus->self;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(pcie_get_minimum_link);
+
+/**
  * pci_select_bars - Make BAR mask from the type of resource
  * @dev: the PCI device for which BAR mask is made
  * @flags: resource type mask to be selected
@@ -3646,7 +3534,7 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
 	u16 cmd;
 	int rc;
 
-	WARN_ON((flags & PCI_VGA_STATE_CHANGE_DECODES) & (command_bits & ~(PCI_COMMAND_IO|PCI_COMMAND_MEMORY)));
+	WARN_ON((flags & PCI_VGA_STATE_CHANGE_DECODES) && (command_bits & ~(PCI_COMMAND_IO|PCI_COMMAND_MEMORY)));
 
 	/* ARCH specific VGA enables */
 	rc = pci_set_vga_state_arch(dev, decode, command_bits, flags);
@@ -3856,6 +3744,63 @@ static void pci_no_domains(void)
 #endif
 }
 
+#ifdef CONFIG_PCI_DOMAINS
+static atomic_t __domain_nr = ATOMIC_INIT(-1);
+
+int pci_get_new_domain_nr(void)
+{
+	return atomic_inc_return(&__domain_nr);
+}
+
+#ifdef CONFIG_PCI_DOMAINS_GENERIC
+
+void pci_bus_assign_domain_nr(struct pci_bus *bus, struct device *parent)
+{
+       static int use_dt_domains = -1;
+       int domain = of_get_pci_domain_nr(parent->of_node);
+
+       /*
+        * Check DT domain and use_dt_domains values.
+        *
+        * If DT domain property is valid (domain >= 0) and
+        * use_dt_domains != 0, the DT assignment is valid since this means
+        * we have not previously allocated a domain number by using
+        * pci_get_new_domain_nr(); we should also update use_dt_domains to
+        * 1, to indicate that we have just assigned a domain number from
+        * DT.
+        *
+        * If DT domain property value is not valid (ie domain < 0), and we
+        * have not previously assigned a domain number from DT
+        * (use_dt_domains != 1) we should assign a domain number by
+        * using the:
+        *
+        * pci_get_new_domain_nr()
+        *
+        * API and update the use_dt_domains value to keep track of method we
+        * are using to assign domain numbers (use_dt_domains = 0).
+        *
+        * All other combinations imply we have a platform that is trying
+        * to mix domain numbers obtained from DT and pci_get_new_domain_nr(),
+        * which is a recipe for domain mishandling and it is prevented by
+        * invalidating the domain value (domain = -1) and printing a
+        * corresponding error.
+        */
+       if (domain >= 0 && use_dt_domains) {
+               use_dt_domains = 1;
+       } else if (domain < 0 && use_dt_domains != 1) {
+               use_dt_domains = 0;
+               domain = pci_get_new_domain_nr();
+       } else {
+               dev_err(parent, "Node %s has inconsistent \"linux,pci-domain\" property in DT\n",
+                       parent->of_node->full_name);
+               domain = -1;
+       }
+
+       bus->domain_nr = domain;
+}
+#endif
+#endif
+
 /**
  * pci_ext_cfg_avail - can we access extended PCI config space?
  *
@@ -3960,7 +3905,6 @@ EXPORT_SYMBOL(pci_restore_state);
 EXPORT_SYMBOL(pci_pme_capable);
 EXPORT_SYMBOL(pci_pme_active);
 EXPORT_SYMBOL(pci_wake_from_d3);
-EXPORT_SYMBOL(pci_target_state);
 EXPORT_SYMBOL(pci_prepare_to_sleep);
 EXPORT_SYMBOL(pci_back_from_sleep);
 EXPORT_SYMBOL_GPL(pci_set_pcie_reset_state);

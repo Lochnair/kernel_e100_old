@@ -111,7 +111,7 @@ static void of_pci_parse_addrs(struct device_node *node, struct pci_dev *dev)
 		res->name = pci_name(dev);
 		region.start = base;
 		region.end = base + size - 1;
-		pcibios_bus_to_resource(dev, res, &region);
+		pcibios_bus_to_resource(dev->bus, res, &region);
 	}
 }
 
@@ -128,7 +128,7 @@ struct pci_dev *of_create_pci_dev(struct device_node *node,
 	const char *type;
 	struct pci_slot *slot;
 
-	dev = alloc_pci_dev();
+	dev = pci_alloc_dev(bus);
 	if (!dev)
 		return NULL;
 	type = of_get_property(node, "device_type", NULL);
@@ -137,7 +137,6 @@ struct pci_dev *of_create_pci_dev(struct device_node *node,
 
 	pr_debug("    create device, devfn: %x, type: %s\n", devfn, type);
 
-	dev->bus = bus;
 	dev->dev.of_node = of_node_get(node);
 	dev->dev.parent = bus->bridge;
 	dev->dev.bus = &pci_bus_type;
@@ -275,7 +274,7 @@ void of_scan_pci_bridge(struct pci_dev *dev)
 		res->flags = flags;
 		region.start = of_read_number(&ranges[1], 2);
 		region.end = region.start + size - 1;
-		pcibios_bus_to_resource(dev, res, &region);
+		pcibios_bus_to_resource(dev->bus, res, &region);
 	}
 	sprintf(bus->name, "PCI Bus %04x:%02x", pci_domain_nr(bus),
 		bus->number);

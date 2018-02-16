@@ -157,7 +157,7 @@ int cvm_oct_xmit_srio(struct sk_buff *skb, struct net_device *dev)
 					8 - skb_headroom(skb));
 			}
 			else
-			new_skb = skb_copy(skb, GFP_ATOMIC);
+				new_skb = skb_copy(skb, GFP_ATOMIC);
 
 			if (new_skb) {
 				tx_header.s.did = t->destid;

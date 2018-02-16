@@ -12,6 +12,7 @@ struct kvm_cpu {
 
 	unsigned long	cpu_id;
 	unsigned long	cpu_type;
+	const char	*cpu_compatible;
 
 	struct kvm	*kvm;
 	int		vcpu_fd;
@@ -28,19 +29,22 @@ struct kvm_cpu {
 };
 
 struct kvm_arm_target {
-	u32	id;
-	int	(*init)(struct kvm_cpu *vcpu);
+	u32		id;
+	const char 	*compatible;
+	int		(*init)(struct kvm_cpu *vcpu);
 };
 
 int kvm_cpu__register_kvm_arm_target(struct kvm_arm_target *target);
 
-static inline bool kvm_cpu__emulate_io(struct kvm *kvm, u16 port, void *data,
+static inline bool kvm_cpu__emulate_io(struct kvm_cpu *vcpu, u16 port, void *data,
 				       int direction, int size, u32 count)
 {
 	return false;
 }
 
-bool kvm_cpu__emulate_mmio(struct kvm *kvm, u64 phys_addr, u8 *data, u32 len,
-			   u8 is_write);
+bool kvm_cpu__emulate_mmio(struct kvm_cpu *vcpu, u64 phys_addr, u8 *data,
+			   u32 len, u8 is_write);
+
+unsigned long kvm_cpu__get_vcpu_mpidr(struct kvm_cpu *vcpu);
 
 #endif /* ARM_COMMON__KVM_CPU_ARCH_H */

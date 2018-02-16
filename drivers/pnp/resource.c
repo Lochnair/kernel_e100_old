@@ -313,6 +313,7 @@ static int pci_dev_uses_irq(struct pnp_dev *pnp, struct pci_dev *pci,
 	progif = class & 0xff;
 	class >>= 8;
 
+#ifdef HAVE_ARCH_PCI_GET_LEGACY_IDE_IRQ
 	if (class == PCI_CLASS_STORAGE_IDE) {
 		/*
 		 * Unless both channels are native-PCI mode only,
@@ -326,6 +327,7 @@ static int pci_dev_uses_irq(struct pnp_dev *pnp, struct pci_dev *pci,
 				return 1;
 			}
 	}
+#endif /* HAVE_ARCH_PCI_GET_LEGACY_IDE_IRQ */
 
 	return 0;
 }

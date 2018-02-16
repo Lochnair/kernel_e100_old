@@ -34,6 +34,7 @@
 #include <linux/io.h>
 
 #define CVMX_SHARED
+#define CVMX_TLS
 
 /* These macros for use when using 32 bit pointers. */
 #define CVMX_MIPS32_SPACE_KSEG0 1l
@@ -84,16 +85,21 @@ static inline unsigned int cvmx_get_node_num(void)
 	unsigned int core_num = cvmx_get_core_num();
 	return (core_num >> CVMX_NODE_NO_SHIFT) & CVMX_NODE_MASK;
 }
+static inline unsigned int cvmx_get_local_core_num(void)
+{
+	return cvmx_get_core_num() & ((1 << CVMX_NODE_NO_SHIFT) - 1);
+}
 
-#include "cvmx-packet.h"
 #include "cvmx-sysinfo.h"
 
 #include "cvmx-address.h"
+#include "cvmx-packet.h"
 
 #include <asm/octeon/octeon-model.h>
 #include "cvmx-csr-enums.h"
 
 #include "cvmx-ciu-defs.h"
+#include "cvmx-ciu3-defs.h"
 #include "cvmx-gpio-defs.h"
 #include "cvmx-iob-defs.h"
 #include "cvmx-ipd-defs.h"
@@ -115,12 +121,11 @@ static inline unsigned int cvmx_get_node_num(void)
 #endif
 
 #if CVMX_ENABLE_DEBUG_PRINTS
-#define cvmx_dprintf        printk
-#define cvmx_dvprintf       vprintk
+#define cvmx_dprintf        pr_debug
 #else
-#define cvmx_dprintf(...)   {}
-#define cvmx_dvprintf(a, b)   {(void)(a);(void)(b);}
+#define cvmx_dprintf(...)   do { } while(0)
 #endif
+#define cvmx_printf        pr_notice
 
 #define CVMX_CACHE_LINE_SIZE    (128)	/* In bytes */
 #define CVMX_CACHE_LINE_MASK    (CVMX_CACHE_LINE_SIZE - 1)	/* In bytes */
@@ -284,12 +289,12 @@ static inline void cvmx_write_csr_node(uint64_t node, uint64_t csr_addr,
 				       uint64_t val)
 {
 	uint64_t node_addr;
-
+	uint64_t composite_csr_addr;
 	node_addr = (node & CVMX_NODE_MASK) << CVMX_NODE_IO_SHIFT;
 
-	csr_addr = (csr_addr & ~CVMX_NODE_IO_MASK) | node_addr;
+	composite_csr_addr = (csr_addr & ~CVMX_NODE_IO_MASK) | node_addr;
 
-	cvmx_write64_uint64(csr_addr, val);
+	cvmx_write64_uint64(composite_csr_addr, val);
 	if (((csr_addr >> 40) & 0x7ffff) == (0x118)) {
 		cvmx_read64_uint64(CVMX_MIO_BOOT_BIST_STAT | node_addr);
 	}
@@ -434,7 +439,7 @@ extern uint64_t octeon_get_clock_rate(void);
  * 2) Check if ("type".s."field" "op" "value")
  * 3) If #2 isn't true loop to #1 unless too much time has passed.
  */
-#define CVMX_WAIT_FOR_FIELD64(address, type, field, op, value, timeout_usec)\
+#define CVMX_WAIT_FOR_FIELD64_NODE(node, address, type, field, op, value, timeout_usec) \
     (									\
 {									\
 	int result;							\
@@ -443,7 +448,7 @@ extern uint64_t octeon_get_clock_rate(void);
 			octeon_get_clock_rate() / 1000000;		\
 		type c;							\
 		while (1) {						\
-			c.u64 = cvmx_read_csr(address);			\
+			c.u64 = cvmx_read_csr_node(node, address);	\
 			if ((c.s.field) op(value)) {			\
 				result = 0;				\
 				break;					\
@@ -457,13 +462,18 @@ extern uint64_t octeon_get_clock_rate(void);
 	result;								\
 })
 
+
+
 /***************************************************************************/
+#define CVMX_WAIT_FOR_FIELD64(address, type, field, op, value, timeout_usec) \
+	CVMX_WAIT_FOR_FIELD64_NODE(0, address, type, field, op, value, timeout_usec)
 
 /* Return the number of cores available in the chip */
 static inline uint32_t cvmx_octeon_num_cores(void)
 {
-	uint32_t ciu_fuse = (uint32_t) cvmx_read_csr(CVMX_CIU_FUSE) & 0xffffffff;
-	return cvmx_pop(ciu_fuse);
+	u64 ciu_fuse;
+	ciu_fuse = cvmx_read_csr(CVMX_CIU_FUSE);
+	return cvmx_dpop(ciu_fuse);
 }
 
 /**
@@ -542,7 +552,14 @@ enum cvmx_error_groups {
 	CVMX_ERROR_GROUP_LMC,
 	CVMX_ERROR_GROUP_L2C,
 	CVMX_ERROR_GROUP_DFM,
+	CVMX_ERROR_GROUP_ILA,
 };
+
+typedef enum {
+	CVMX_ERROR_TYPE_NONE = 0,	/* Default, no group */
+	CVMX_ERROR_TYPE_SBE  = 1 << 0,	/* Single bit error for Co-processor blocks */
+	CVMX_ERROR_TYPE_DBE  = 1 << 1,	/* Double bit error for Co-processor blocks */ 
+} cvmx_error_type_t;
 
 struct cvmx_error_regbit {
 	u8 valid:1;
@@ -575,5 +592,29 @@ struct cvmx_error_tree {
 };
 
 extern struct cvmx_error_tree octeon_error_trees[];
+
+struct cvmx_error_78xx {
+	u64 block_csr;		/* CSR's address */
+	const char *err_mesg;	/* Error message */
+	u32 intsn;		/* Interrupt source number */
+	u16 flags;		/* Flags */
+	u8 error_group;		/* Error group */
+	u8 block_csr_bitpos;	/* Bit position in the CSR */
+};
+
+extern unsigned int cvmx_error_78xx_array_sizes[];
+
+extern struct cvmx_error_78xx error_array_cn78xx[];
+extern struct cvmx_error_78xx error_array_cn78xxp2[];
+extern struct cvmx_error_78xx error_array_cn73xx[];
+extern struct cvmx_error_78xx error_array_cnf75xx[];
+
+struct cvmx_error_array {
+	struct cvmx_error_78xx *array;
+	uint32_t prid_mask;
+	uint32_t prid_val;
+};
+
+extern struct cvmx_error_array octeon_error_arrays[];
 
 #endif /*  __CVMX_H__  */

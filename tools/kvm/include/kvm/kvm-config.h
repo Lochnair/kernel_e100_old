@@ -27,6 +27,7 @@ struct kvm_config {
 	int active_console;
 	int debug_iodelay;
 	int nrcpus;
+	int nrthreads;
 	const char *kernel_cmdline;
 	const char *kernel_filename;
 	const char *vmlinux_filename;
@@ -48,6 +49,7 @@ struct kvm_config {
 	struct virtio_net_params *net_params;
 	bool single_step;
 	bool vnc;
+	bool gtk;
 	bool sdl;
 	bool balloon;
 	bool using_rootfs;

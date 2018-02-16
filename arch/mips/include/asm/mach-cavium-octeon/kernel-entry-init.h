@@ -29,7 +29,6 @@
 	.set arch=octeon
 #ifdef CONFIG_HOTPLUG_CPU
 	b	7f
-	nop
 
 FEXPORT(octeon_hotplug_entry)
 	move	a0, zero
@@ -38,22 +37,14 @@ FEXPORT(octeon_hotplug_entry)
 	move	a3, zero
 7:
 #endif	/* CONFIG_HOTPLUG_CPU */
-#ifdef	CONFIG_CPU_LITTLE_ENDIAN
-	.set push
-	.set noreorder
-	/* Hotpplugged CPUs enter in Big-Endian mode, switch here to LE */
-	dmfc0   v0, CP0_CVMCTL_REG
-	nop
-	ori     v0, v0, 2
-	nop
-	dmtc0   v0, CP0_CVMCTL_REG	/* little-endian */
-	nop
-	synci	0($0)
-	.set pop
-#endif	/* CONFIG_CPU_LITTLE_ENDIAN */
 	mfc0	v0, CP0_STATUS
 	/* Force 64-bit addressing enabled */
 	ori	v0, v0, (ST0_UX | ST0_SX | ST0_KX)
+	/* Clear NMI and SR as they are sometimes restored and 0 -> 1
+	 * transitions are not allowed
+	 */
+	li	v1, ~(ST0_NMI | ST0_SR)
+	and	v0, v1
 	mtc0	v0, CP0_STATUS
 
 	# Clear the TLB.
@@ -157,16 +148,24 @@ FEXPORT(octeon_hotplug_entry)
 	dsllv	v1, v1, t1
 	daddu	v1, v1, t3
 	sd	v1, 0(v0)
+#endif
 	dla	v0, continue_in_mapped_space
 	jr	v0
 
 continue_in_mapped_space:
-#endif
+
+	mfc0	v1, CP0_PRID_REG
+	andi	v1, 0xff00
+	li	v0, 0x9500		# cn78XX or later
+	subu	v1, v1, v0
+	li	t2, 2 + CONFIG_CAVIUM_OCTEON_EXTRA_CVMSEG
+	bltz	v1, 1f
+	addiu	t2, 1			# t2 has cvmseg_size
+1:
 	# Read the cavium mem control register
 	dmfc0	v0, CP0_CVMMEMCTL_REG
 	# Clear the lower 6 bits, the CVMSEG size
-	dins	v0, $0, 0, 6
-	ori	v0, CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE
+	dins	v0, t2, 0, 6
 	dmtc0	v0, CP0_CVMMEMCTL_REG	# Write the cavium mem control register
 	dmfc0	v0, CP0_CVMCTL_REG	# Read the cavium control register
 	# Disable unaligned load/store support but leave HW fixup enabled
@@ -216,7 +215,7 @@ continue_in_mapped_space:
 #endif
 
 	# Zero all of CVMSEG to make sure parity is correct
-	dli	v0, CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE
+	move	v0, t2
 	dsll	v0, 7
 	beqz	v0, 2f
 1:	dsubu	v0, 8
@@ -261,12 +260,7 @@ octeon_spin_wait_boot:
 	LONG_L	sp, (t0)
 	# Set the SP global variable to zero so the master knows we've started
 	LONG_S	zero, (t0)
-#ifdef __OCTEON__
-	syncw
-	syncw
-#else
 	sync
-#endif
 	# Jump to the normal Linux SMP entry point
 	j   smp_bootstrap
 	nop
@@ -283,6 +277,35 @@ octeon_wait_forever:
 
 #endif /* CONFIG_SMP */
 octeon_main_processor:
+	dla	v0, octeon_cvmseg_lines
+	sw	t2, 0(v0)
+#ifdef CONFIG_CAVIUM_OCTEON2
+	mfc0	v1, CP0_PRID_REG
+	andi	v1, 0xff00
+	srl	v1, 8
+	addiu	v1, -0x90
+	bgez	v1, 1f
+	/* Pre-OCTEON II running with CONFIG_CAVIUM_OCTEON2 will not work. */
+	ld	v1, 0x140(a3)
+	dli	v0, 0x8001180000000800 /* UART base */
+	bbit0	v1, 35, 2f /* Check for UART1 */
+	daddiu	v0, 0x400
+2:
+	dla	v1, octeon_not_compatible
+3:
+	lbu	t0, 0(v1)
+	daddiu	v1, 1
+	beqz	t0, 4f
+5:
+	ld	t1, 0x28(v0) /* LSR*/
+	bbit0	t1, 5, 5b
+	sd	t0, 0x40(v0)
+	b	3b
+4:
+	wait
+	b	4b
+1:
+#endif /* CONFIG_CAVIUM_OCTEON2 */
 	.set pop
 .endm
 

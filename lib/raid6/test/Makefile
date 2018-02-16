@@ -25,11 +25,11 @@ endif
 ifeq ($(IS_X86),yes)
         OBJS   += mmx.o sse1.o sse2.o avx2.o recov_ssse3.o recov_avx2.o
         CFLAGS += $(shell echo "vpbroadcastb %xmm0, %ymm1" |	\
-                    gcc -c -x assembler - >&/dev/null &&	\
+                    gcc -c -x assembler - >/dev/null 2>&1 &&	\
                     rm ./-.o && echo -DCONFIG_AS_AVX2=1)
 else
         HAS_ALTIVEC := $(shell echo -e '\#include <altivec.h>\nvector int a;' |\
-                         gcc -c -x c - >&/dev/null && \
+                         gcc -c -x c - >/dev/null 2>&1 && \
                          rm ./-.o && echo yes)
         ifeq ($(HAS_ALTIVEC),yes)
                 OBJS += altivec1.o altivec2.o altivec4.o altivec8.o

@@ -16,7 +16,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/console.h>
-#include <linux/mutex.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
@@ -83,7 +82,7 @@ struct octeon_pci_console_desc {
 struct octeon_pci_console {
 	struct console con;
 	struct tty_driver *ttydrv;
-	struct mutex lock;
+	spinlock_t lock;
 	struct octeon_pci_console_rings *rings;
 	/* Pointers to the ring memory refered to in rings. */
 	u8 *input_ring;
@@ -120,7 +119,7 @@ static void octeon_pci_console_lowlevel_write(struct octeon_pci_console *opc,
 					      const char *str, unsigned int len)
 {
 	u32 s = opc->rings->buf_size;
-	mutex_lock(&opc->lock);
+	spin_lock(&opc->lock);
 	while (len > 0) {
 		u32 r =  opc->rings->output_read_index;
 		u32 w =  opc->rings->output_write_index;
@@ -142,7 +141,7 @@ static void octeon_pci_console_lowlevel_write(struct octeon_pci_console *opc,
 		opc->rings->output_write_index = w;
 		wmb();
 	}
-	mutex_unlock(&opc->lock);
+	spin_unlock(&opc->lock);
 }
 
 static void octeon_pci_console_write(struct console *con, const char *str,
@@ -181,7 +180,7 @@ static int octeon_pci_console_setup0(struct octeon_pci_console *opc)
 			opc->rings = phys_to_virt(opcd->console_addr_array[opc->index]);
 		else
 			goto fail;
-		mutex_init(&octeon_pci_console.lock);
+		spin_lock_init(&octeon_pci_console.lock);
 		opc->input_ring = phys_to_virt(opc->rings->input_base_addr);
 		opc->output_ring = phys_to_virt(opc->rings->output_base_addr);
 	}

@@ -673,7 +673,6 @@ static void emulate_load_store_insn(struct pt_regs *regs,
 	case sdc1_op:
 		die_if_kernel("Unaligned FP access in kernel code", regs);
 		BUG_ON(!used_math());
-		BUG_ON(!is_fpu_owner());
 
 		lose_fpu(1);	/* Save FPU state for the emulator. */
 		res = fpu_emulator_cop1Handler(regs, &current->thread.fpu, 1,
@@ -1618,13 +1617,21 @@ sigill:
 	    ("Unhandled kernel unaligned access or invalid instruction", regs);
 	force_sig(SIGILL, current);
 }
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+#include <asm/octeon/octeon.h>
+/*
+ * modified in kernel-entry-init.h, must have an initial value to keep
+ * it from being clobbered when bss is zeroed.
+ */
+u32 octeon_cvmseg_lines = 2;
+#endif
 asmlinkage void do_ade(struct pt_regs *regs)
 {
 	enum ctx_state prev_state;
 	unsigned int __user *pc;
 	mm_segment_t seg;
 
-#if defined(CONFIG_CPU_CAVIUM_OCTEON) && (CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0)
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
 	/*
 	 * Allows tasks to access CVMSEG addresses. These are special
 	 * addresses into the Octeon L1 Cache that can be used as fast
@@ -1635,13 +1642,20 @@ asmlinkage void do_ade(struct pt_regs *regs)
 	 * app.
 	 */
 	const unsigned long CVMSEG_BASE	= 0xffffffffffff8000ul;
-	const unsigned long CVMSEG_IO	= 0xffffffffffffa200ul;
-	u64 cvmmemctl			= __read_64bit_c0_register($11, 7);
-	unsigned long cvmseg_size	= (cvmmemctl & 0x3f) * 128;
+	const unsigned long CVMSEG_IO		= 0xffffffffffffa000ul;
+	const unsigned long CVMSEG_IO_END	= 0xffffffffffffc000ul;
+	u64 cvmmemctl;
+	unsigned long cvmseg_size	= octeon_cvmseg_lines * 128;
 
-	if ((regs->cp0_badvaddr == CVMSEG_IO) ||
-	    ((regs->cp0_badvaddr >= CVMSEG_BASE) &&
-	     (regs->cp0_badvaddr < CVMSEG_BASE + cvmseg_size))) {
+	if ((regs->cp0_badvaddr >= CVMSEG_IO && regs->cp0_badvaddr < CVMSEG_IO_END) ||
+	    (regs->cp0_badvaddr >= CVMSEG_BASE && regs->cp0_badvaddr < CVMSEG_BASE + cvmseg_size)) {
+#if defined(CONFIG_CAVIUM_OCTEON_USER_IO_PER_PROCESS)
+		struct task_struct *group_leader = current->group_leader;
+		if (!test_tsk_thread_flag(group_leader, TIF_XKPHYS_IO_EN)) {
+			prev_state = exception_enter();
+			goto sigbus;
+		}
+#endif
 		preempt_disable();
 		cvmmemctl = __read_64bit_c0_register($11, 7);
 		/* Make sure all async operations are done */
@@ -1649,19 +1663,17 @@ asmlinkage void do_ade(struct pt_regs *regs)
 		/* Enable userspace access to CVMSEG */
 		cvmmemctl |= 1 << 6;
 		__write_64bit_c0_register($11, 7, cvmmemctl);
-# ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
 		/*
 		 * Restore the processes CVMSEG data. Leave off the
-		 * last 8 bytes since the kernel stores the thread
-		 * pointer there.
+		 * second 128 bytes since they are reserved for kernel use.
 		 */
-		memcpy((void *)CVMSEG_BASE, current->thread.cvmseg.cvmseg,
-		       cvmseg_size - 8);
-# else
-		/* Restore the processes CVMSEG data */
-		memcpy((void *)CVMSEG_BASE, current->thread.cvmseg.cvmseg,
-		       cvmseg_size);
-# endif
+		if (octeon_cvmseg_lines > 0)
+			memcpy((void *)(CVMSEG_BASE + 0), current->thread.cvmseg.cvmseg[0],
+			       128);
+		if (octeon_cvmseg_lines > 2)
+			memcpy((void *)(CVMSEG_BASE + 256), current->thread.cvmseg.cvmseg[2],
+			       cvmseg_size - 256);
+
 		preempt_enable();
 		return;
 	}

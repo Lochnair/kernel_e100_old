@@ -63,7 +63,7 @@ int pci_shmem__register_mem(struct shmem_info *si)
 	return 0;
 }
 
-static bool shmem_pci__io_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool shmem_pci__io_in(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	u16 offset = port - ivshmem_registers;
 
@@ -82,7 +82,7 @@ static bool shmem_pci__io_in(struct ioport *ioport, struct kvm *kvm, u16 port, v
 	return true;
 }
 
-static bool shmem_pci__io_out(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool shmem_pci__io_out(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	u16 offset = port - ivshmem_registers;
 
@@ -105,7 +105,7 @@ static struct ioport_operations shmem_pci__io_ops = {
 	.io_out	= shmem_pci__io_out,
 };
 
-static void callback_mmio_msix(u64 addr, u8 *data, u32 len, u8 is_write, void *ptr)
+static void callback_mmio_msix(struct kvm_cpu *vcpu, u64 addr, u8 *data, u32 len, u8 is_write, void *ptr)
 {
 	void *mem;
 
@@ -336,8 +336,9 @@ int shmem_parser(const struct option *opt, const char *arg, int unset)
 		strcpy(handle, default_handle);
 	}
 	if (verbose) {
-		pr_info("shmem: phys_addr = %llx", phys_addr);
-		pr_info("shmem: size      = %llx", size);
+		pr_info("shmem: phys_addr = %llx",
+			(unsigned long long)phys_addr);
+		pr_info("shmem: size      = %llx", (unsigned long long)size);
 		pr_info("shmem: handle    = %s", handle);
 		pr_info("shmem: create    = %d", create);
 	}
@@ -352,20 +353,11 @@ int shmem_parser(const struct option *opt, const char *arg, int unset)
 
 int pci_shmem__init(struct kvm *kvm)
 {
-	u8 line, pin;
 	char *mem;
 	int r;
 
 	if (shmem_region == NULL)
 		return 0;
-
-	/* Register good old INTx */
-	r = irq__register_device(PCI_DEVICE_ID_PCI_SHMEM, &pin, &line);
-	if (r < 0)
-		return r;
-
-	pci_shmem_pci_device.irq_pin = pin;
-	pci_shmem_pci_device.irq_line = line;
 
 	/* Register MMIO space for MSI-X */
 	r = ioport__register(kvm, IOPORT_EMPTY, &shmem_pci__io_ops, IOPORT_SIZE, NULL);

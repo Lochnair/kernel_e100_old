@@ -42,15 +42,15 @@
 #include "octeon-ethernet.h"
 
 #include <asm/octeon/cvmx-wqe.h>
-#include <asm/octeon/cvmx-fau.h>
+#include <asm/octeon/cvmx-hwfau.h>
 #include <asm/octeon/cvmx-ipd.h>
 #include <asm/octeon/cvmx-pip.h>
-#include <asm/octeon/cvmx-pko.h>
+#include <asm/octeon/cvmx-hwpko.h>
 #include <asm/octeon/cvmx-helper.h>
 
 #include <asm/octeon/cvmx-gmxx-defs.h>
 
-#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 #include "ipfwd_config.h"
 #endif
 
@@ -62,7 +62,7 @@
  * GET_SKBUFF_QOS as: #define GET_SKBUFF_QOS(skb) ((skb)->priority)
  */
 #ifndef GET_SKBUFF_QOS
-#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD) && IPFWD_OUTPUT_QOS
+#if CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD && IPFWD_OUTPUT_QOS
 #define GET_SKBUFF_QOS(skb) ((skb)->cvm_info.qos_level)
 #else
 #define GET_SKBUFF_QOS(skb) 0
@@ -72,6 +72,9 @@
 static bool cvm_oct_skb_ok_for_reuse(struct sk_buff *skb)
 {
 	unsigned char *fpa_head = cvm_oct_get_fpa_head(skb);
+
+	if (*(struct sk_buff **)(fpa_head - sizeof(void *)) != skb)
+		return false;
 
 	if (unlikely(skb->data < fpa_head))
 		return false;
@@ -206,7 +209,11 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 
 	/* Build the PKO command */
 	pko_command.u64 = 0;
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
+	pko_command.s.n2 = 0; /* pollute L2 with the outgoing packet */
+#else 
 	pko_command.s.n2 = 1; /* Don't pollute L2 with the outgoing packet */
+#endif
 	pko_command.s.dontfree = !do_free;
 	pko_command.s.segs = work->word2.s.bufs;
 	pko_command.s.total_bytes = work->word1.len;
@@ -215,14 +222,14 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 	if (unlikely(work->word2.s.not_IP || work->word2.s.IP_exc))
 		pko_command.s.ipoffp1 = 0;
 	else
-#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1 + cvmx_wqe_get_unused8(work);
 #else
 		pko_command.s.ipoffp1 = sizeof(struct ethhdr) + 1;
 #endif
 
 	/* Send the packet to the output queue */
-	if (unlikely(cvmx_pko_send_packet_finish_pkoid(priv->pko_port, priv->tx_queue[qos].queue, pko_command, hw_buffer, lock_type))) {
+	if (unlikely(cvmx_hwpko_send_packet_finish_pkoid(priv->pko_port, priv->tx_queue[qos].queue, pko_command, hw_buffer, lock_type))) {
 		netdev_err(dev, "Error: Failed to send the packet\n");
 		dropped = -1;
 	}
@@ -234,12 +241,12 @@ int cvm_oct_transmit_qos(struct net_device *dev,
 		dev->stats.tx_dropped++;
 	} else
 	if (do_free)
-		cvmx_fpa_free(work, wqe_pool, DONT_WRITEBACK(1));
+		cvmx_fpa1_free(work, wqe_pool, DONT_WRITEBACK(1));
 
 	return dropped;
 }
 EXPORT_SYMBOL(cvm_oct_transmit_qos);
-#if IS_ENABLED(CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD)
+#ifdef CONFIG_CAVIUM_OCTEON_IPFWD_OFFLOAD
 /**
  * cvm_oct_transmit_qos_not_free - transmit a work queue entry out of the ethernet port.
  *
@@ -355,7 +362,7 @@ int cvm_oct_transmit_qos_not_free(struct net_device *dev,
 	cvmx_pko_send_packet_prepare_pkoid(priv->pko_port, priv->tx_queue[qos].queue, lock_type);
 
 	/* Send the packet to the output queue */
-	if (unlikely(cvmx_pko_send_packet_finish3_pkoid(priv->pko_port, priv->tx_queue[qos].queue,
+	if (unlikely(cvmx_hwpko_send_packet_finish3_pkoid(priv->pko_port, priv->tx_queue[qos].queue,
 							pko_command, hw_buffer, word2, lock_type))) {
 		printk("%s: Failed to send the packet\n", dev->name);
 		dropped = -1;
@@ -364,7 +371,7 @@ int cvm_oct_transmit_qos_not_free(struct net_device *dev,
 
 skip_xmit:
 	if (unlikely(dropped)) {
-		cvmx_fau_atomic_add32(priv->tx_queue[qos].fau, -1);
+		cvmx_hwfau_atomic_add32(priv->tx_queue[qos].fau, -1);
 		dev_kfree_skb_any(skb);
 		dev->stats.tx_dropped++;
 		if (work)

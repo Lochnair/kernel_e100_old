@@ -57,7 +57,6 @@
 #include <asm/types.h>
 #include <asm/stacktrace.h>
 #include <asm/uasm.h>
-#include <asm/kvm_mips_vz.h>
 
 extern void check_wait(void);
 extern asmlinkage void rollback_handle_int(void);
@@ -387,17 +386,14 @@ void __noreturn die(const char *str, struct pt_regs *regs)
 
 	oops_exit();
 
+	if (regs && kexec_should_crash(current))
+		crash_kexec(regs);
+
 	if (in_interrupt())
 		panic("Fatal exception in interrupt");
 
-	if (panic_on_oops) {
-		printk(KERN_EMERG "Fatal exception: panic in 5 seconds");
-		ssleep(5);
+	if (panic_on_oops)
 		panic("Fatal exception");
-	}
-
-	if (regs && kexec_should_crash(current))
-		crash_kexec(regs);
 
 	do_exit(sig);
 }
@@ -1093,12 +1089,7 @@ asmlinkage void do_cpu(struct pt_regs *regs)
 
 
 	prev_state = exception_enter();
-#ifdef CONFIG_KVM_MIPS_VZ
-	if (test_tsk_thread_flag(current, TIF_GUESTMODE)) {
-		if (mipsvz_cp_unusable(regs))
-			goto out;
-	}
-#endif
+
 	die_if_kernel("do_cpu invoked from kernel context!", regs);
 
 	msa_kernel();
@@ -1560,11 +1551,6 @@ void __uasminit *set_except_vector(int n, void *addr)
 #endif
 		u32 *buf = (u32 *)(ebase + 0x200);
 		unsigned int k0 = 26;
-#ifdef CONFIG_KVM_MIPS_VZ
-		unsigned int k1 = 27;
-		UASM_i_MTC0(&buf, k0, 31, 2);
-		UASM_i_MTC0(&buf, k1, 31, 3);
-#endif
 		if ((handler & jump_mask) == ((ebase + 0x200) & jump_mask)) {
 			uasm_i_j(&buf, handler & ~jump_mask);
 			uasm_i_nop(&buf);

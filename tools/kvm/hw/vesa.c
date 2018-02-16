@@ -18,12 +18,12 @@
 #include <inttypes.h>
 #include <unistd.h>
 
-static bool vesa_pci_io_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool vesa_pci_io_in(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	return true;
 }
 
-static bool vesa_pci_io_out(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool vesa_pci_io_out(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	return true;
 }
@@ -55,23 +55,16 @@ static struct framebuffer vesafb;
 struct framebuffer *vesa__init(struct kvm *kvm)
 {
 	u16 vesa_base_addr;
-	u8 line, pin;
 	char *mem;
 	int r;
 
-	if (!kvm->cfg.vnc && !kvm->cfg.sdl)
+	if (!kvm->cfg.vnc && !kvm->cfg.sdl && !kvm->cfg.gtk)
 		return NULL;
-
-	r = irq__register_device(PCI_DEVICE_ID_VESA, &pin, &line);
-	if (r < 0)
-		return ERR_PTR(r);
 
 	r = ioport__register(kvm, IOPORT_EMPTY, &vesa_io_ops, IOPORT_SIZE, NULL);
 	if (r < 0)
 		return ERR_PTR(r);
 
-	vesa_pci_device.irq_pin		= pin;
-	vesa_pci_device.irq_line	= line;
 	vesa_base_addr			= (u16)r;
 	vesa_pci_device.bar[0]		= cpu_to_le32(vesa_base_addr | PCI_BASE_ADDRESS_SPACE_IO);
 	device__register(&vesa_device);

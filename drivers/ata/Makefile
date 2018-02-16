@@ -4,7 +4,7 @@ obj-$(CONFIG_ATA)		+= libata.o
 # non-SFF interface
 obj-$(CONFIG_SATA_AHCI)		+= ahci.o libahci.o
 obj-$(CONFIG_SATA_ACARD_AHCI)	+= acard-ahci.o libahci.o
-obj-$(CONFIG_SATA_AHCI_PLATFORM) += ahci_platform.o libahci.o
+obj-$(CONFIG_SATA_AHCI_PLATFORM) += ahci_platform.o libahci.o libahci_platform.o
 obj-$(CONFIG_SATA_FSL)		+= sata_fsl.o
 obj-$(CONFIG_SATA_INIC162X)	+= sata_inic162x.o
 obj-$(CONFIG_SATA_SIL24)	+= sata_sil24.o
@@ -14,6 +14,7 @@ obj-$(CONFIG_SATA_PHY)		+= sata_phy.o
 obj-$(CONFIG_SATA_EXYNOS)	+= sata_exynos.o sata_exynos_phy.o libahci.o
 obj-$(CONFIG_AHCI_IMX)		+= ahci_imx.o
 obj-$(CONFIG_SATA_OCTEON)	+= sata_octeon.o
+obj-$(CONFIG_AHCI_ST)		+= ahci_st.o libahci.o libahci_platform.o
 
 # SFF w/ custom DMA
 obj-$(CONFIG_PDC_ADMA)		+= pdc_adma.o

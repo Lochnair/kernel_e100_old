@@ -23,6 +23,7 @@
 #include <linux/irq_work.h>
 #include <linux/posix-timers.h>
 #include <linux/perf_event.h>
+#include "../sched/sched.h"
 
 #include <asm/irq_regs.h>
 
@@ -214,6 +215,7 @@ static void nohz_full_kick_work_func(struct irq_work *work)
 
 static DEFINE_PER_CPU(struct irq_work, nohz_full_kick_work) = {
 	.func = nohz_full_kick_work_func,
+	.flags = IRQ_WORK_HARD_IRQ,
 };
 
 /*
@@ -476,6 +478,7 @@ static ktime_t tick_nohz_start_idle(int cpu, struct tick_sched *ts)
 u64 get_cpu_idle_time_us(int cpu, u64 *last_update_time)
 {
 	struct tick_sched *ts = &per_cpu(tick_cpu_sched, cpu);
+#ifndef CONFIG_MICROSTATE_ACCT
 	ktime_t now, idle;
 
 	if (!tick_nohz_enabled)
@@ -494,9 +497,33 @@ u64 get_cpu_idle_time_us(int cpu, u64 *last_update_time)
 			idle = ts->idle_sleeptime;
 		}
 	}
-
 	return ktime_to_us(idle);
+#else
+	u64 *cpustat = kcpustat_cpu(cpu).cpustat;
+	msa_time_t now, delta;
+	struct rq *rq;
 
+	if (!tick_nohz_enabled)
+		return -1;
+
+	if (last_update_time) {
+		MSA_NOW(now);
+		delta = now - usecs_to_cputime64(*last_update_time);
+		if (delta > 0)
+			cpustat[CPUTIME_IDLE] += delta;
+		return cputime_to_usecs(cpustat[CPUTIME_IDLE]);
+	}
+
+	if (!ts->idle_active || nr_iowait_cpu(cpu))
+		return -1;
+
+	rq = cpu_rq(cpu);
+	MSA_NOW(now);
+	delta = now - rq->idle->microstates.last_change;
+	if (delta < 0)
+		delta = 0;
+	return cputime_to_usecs(cpustat[CPUTIME_IDLE] + delta);
+#endif /* CONFIG_MICROSTATE_ACCT */
 }
 EXPORT_SYMBOL_GPL(get_cpu_idle_time_us);
 
@@ -517,6 +544,7 @@ EXPORT_SYMBOL_GPL(get_cpu_idle_time_us);
 u64 get_cpu_iowait_time_us(int cpu, u64 *last_update_time)
 {
 	struct tick_sched *ts = &per_cpu(tick_cpu_sched, cpu);
+#ifndef CONFIG_MICROSTATE_ACCT
 	ktime_t now, iowait;
 
 	if (!tick_nohz_enabled)
@@ -537,6 +565,32 @@ u64 get_cpu_iowait_time_us(int cpu, u64 *last_update_time)
 	}
 
 	return ktime_to_us(iowait);
+#else
+	u64 *cpustat = kcpustat_cpu(cpu).cpustat;
+	msa_time_t now, delta;
+	struct rq *rq;
+
+	if (!tick_nohz_enabled)
+		return -1;
+
+	if (last_update_time) {
+		MSA_NOW(now);
+		delta = now - usecs_to_cputime64(*last_update_time);
+		if (delta > 0)
+			cpustat[CPUTIME_IOWAIT] += delta;
+		return cputime_to_usecs(cpustat[CPUTIME_IOWAIT]);
+	}
+
+	if (!ts->idle_active || nr_iowait_cpu(cpu) == 0)
+		return -1;
+
+	rq = cpu_rq(cpu);
+	MSA_NOW(now);
+	delta = now - rq->idle->microstates.last_change;
+	if (delta < 0)
+		delta = 0;
+	return cputime_to_usecs(cpustat[CPUTIME_IOWAIT] + delta);
+#endif /* CONFIG_MICROSTATE_ACCT */
 }
 EXPORT_SYMBOL_GPL(get_cpu_iowait_time_us);
 
@@ -724,8 +778,10 @@ static bool can_stop_idle_tick(int cpu, struct tick_sched *ts)
 		return false;
 	}
 
-	if (unlikely(ts->nohz_mode == NOHZ_MODE_INACTIVE))
+	if (unlikely(ts->nohz_mode == NOHZ_MODE_INACTIVE)) {
+		ts->sleep_length = (ktime_t) { .tv64 = NSEC_PER_SEC/HZ };
 		return false;
+	}
 
 	if (need_resched())
 		return false;

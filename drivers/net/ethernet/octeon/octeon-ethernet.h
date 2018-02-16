@@ -36,7 +36,7 @@
 #include "octeon_common.h"
 
 #include <asm/octeon/cvmx-helper.h>
-#include <asm/octeon/cvmx-fau.h>
+#include <asm/octeon/cvmx-hwfau.h>
 #include <asm/octeon/octeon-ethernet-user.h>
 
 /**
@@ -152,8 +152,8 @@ int cvm_oct_xmit_lockless(struct sk_buff *skb, struct net_device *dev);
 
 void cvm_oct_poll_controller(struct net_device *dev);
 void cvm_oct_rx_initialize(int);
-void cvm_oct_rx_shutdown0(void);
-void cvm_oct_rx_shutdown1(void);
+void cvm_oct_rx_shutdown0(bool in_crash);
+void cvm_oct_rx_shutdown1(bool in_crash);
 
 int cvm_oct_mem_fill_fpa(int pool, int elements);
 int cvm_oct_mem_empty_fpa(int pool, int elements);
@@ -188,14 +188,14 @@ static inline void cvm_oct_rx_refill_pool(int fill_threshold)
 	int num_freed;
 	/* Refill the packet buffer pool */
 	number_to_free =
-		cvmx_fau_fetch_and_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE, 0);
+		cvmx_hwfau_fetch_and_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE, 0);
 
 	if (number_to_free > fill_threshold) {
-		cvmx_fau_atomic_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE,
+		cvmx_hwfau_atomic_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE,
 				      -number_to_free);
 		num_freed = cvm_oct_mem_fill_fpa(packet_pool, number_to_free);
 		if (num_freed != number_to_free) {
-			cvmx_fau_atomic_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE,
+			cvmx_hwfau_atomic_add32(FAU_NUM_PACKET_BUFFERS_TO_FREE,
 					number_to_free - num_freed);
 		}
 	}

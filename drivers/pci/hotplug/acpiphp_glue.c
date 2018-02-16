@@ -39,7 +39,6 @@
  *    bus. It loses the refcount when the the driver unloads.
  */
 
-#include <linux/init.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -723,7 +722,6 @@ static int __ref enable_device(struct acpiphp_slot *slot)
 	acpiphp_sanitize_bus(bus);
 	acpiphp_set_hpp_values(bus);
 	acpiphp_set_acpi_region(slot);
-	pci_enable_bridges(bus);
 
 	list_for_each_entry(dev, &bus->devices, bus_list) {
 		/* Assume that newly added devices are powered on already. */

@@ -11,13 +11,13 @@ config HAVE_PATA_PLATFORM
 	  to update the PATA_PLATFORM entry.
 
 menuconfig ATA
-	tristate "Serial ATA and Parallel ATA drivers"
+	tristate "Serial ATA and Parallel ATA drivers (libata)"
 	depends on HAS_IOMEM
 	depends on BLOCK
 	depends on !(M32R || M68K || S390) || BROKEN
 	select SCSI
 	---help---
-	  If you want to use a ATA hard disk, ATA tape drive, ATA CD-ROM or
+	  If you want to use an ATA hard disk, ATA tape drive, ATA CD-ROM or
 	  any other ATA device under Linux, say Y and make sure that you know
 	  the name of your ATA host adapter (the card inside your computer
 	  that "speaks" the ATA protocol, also called ATA controller),
@@ -125,6 +125,14 @@ config AHCI_IMX
 	help
 	  This option enables support for the Freescale i.MX SoC's
 	  onboard AHCI SATA.
+
+	  If unsure, say N.
+
+config AHCI_ST
+	tristate "ST AHCI SATA support"
+	depends on ARCH_STI
+	help
+	  This option enables support for ST AHCI SATA controller.
 
 	  If unsure, say N.
 
@@ -693,7 +701,7 @@ config PATA_RDC
 
 config PATA_SC1200
 	tristate "SC1200 PATA support"
-	depends on PCI
+	depends on PCI && (X86_32 || COMPILE_TEST)
 	help
 	  This option enables support for the NatSemi/AMD SC1200 SoC
 	  companion chip used with the Geode processor family.

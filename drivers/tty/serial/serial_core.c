@@ -133,25 +133,10 @@ uart_update_mctrl(struct uart_port *port, unsigned int set, unsigned int clear)
 #define uart_set_mctrl(port, set)	uart_update_mctrl(port, set, 0)
 #define uart_clear_mctrl(port, clear)	uart_update_mctrl(port, 0, clear)
 
-/*
- * Startup the port.  This will be called once per open.  All calls
- * will be serialised by the per-port mutex.
- */
-static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
-		int init_hw)
+static int alloc_xmit_buf(struct uart_state *state)
 {
-	struct uart_port *uport = state->uart_port;
-	struct tty_port *port = &state->port;
 	unsigned long page;
-	int retval = 0;
 
-	if (uport->type == PORT_UNKNOWN)
-		return 1;
-
-	/*
-	 * Initialise and allocate the transmit and temporary
-	 * buffer.
-	 */
 	if (!state->xmit.buf) {
 		/* This is protected by the per port mutex */
 		page = get_zeroed_page(GFP_KERNEL);
@@ -161,6 +146,30 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 		state->xmit.buf = (unsigned char *) page;
 		uart_circ_clear(&state->xmit);
 	}
+	return 0;
+}
+
+/*
+ * Startup the port.  This will be called once per open.  All calls
+ * will be serialised by the per-port mutex.
+ */
+static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
+		int init_hw)
+{
+	struct uart_port *uport = state->uart_port;
+	struct tty_port *port = &state->port;
+	int retval = 0;
+
+	if (uport->type == PORT_UNKNOWN)
+		return 1;
+
+	/*
+	 * Initialise and allocate the transmit and temporary
+	 * buffer.
+	 */
+	retval = alloc_xmit_buf(state);
+	if (retval)
+		return retval;
 
 	retval = uport->ops->startup(uport);
 	if (retval == 0) {
@@ -249,6 +258,9 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 		/*
 		 * Turn off DTR and RTS early.
 		 */
+		if (uart_console(uport) && tty)
+			uport->cons->cflag = tty->termios.c_cflag;
+
 		if (!tty || (tty->termios.c_cflag & HUPCL))
 			uart_clear_mctrl(uport, TIOCM_DTR | TIOCM_RTS);
 
@@ -366,7 +378,7 @@ uart_get_baud_rate(struct uart_port *port, struct ktermios *termios,
 		 * The spd_hi, spd_vhi, spd_shi, spd_warp kludge...
 		 * Die! Die! Die!
 		 */
-		if (baud == 38400)
+		if (try == 0 && baud == 38400)
 			baud = altbaud;
 
 		/*
@@ -1945,6 +1957,7 @@ static void uartdrv_console_write(struct console *co, const char *s,
 	int locked = 1;
 	int tmout;
 	int free;
+	int pending;
 
 	touch_nmi_watchdog();
 
@@ -2019,13 +2032,13 @@ do_timer:
 	 */
 
 	tmout = 10000;
-	free = uart_circ_chars_free(circ);
-	while ((free > 0) || !port->ops->tx_empty(port)) {
+	pending = uart_circ_chars_pending(circ);
+	while ((pending > 0) || !port->ops->tx_empty(port)) {
 		port->ops->poll(port, UART_POLL_FLAGS_TX);
 
-		if (free != uart_circ_chars_free(circ)) {
+		if (pending != uart_circ_chars_pending(circ)) {
 			tmout = 10000;
-			free = uart_circ_chars_free(circ);
+			pending = uart_circ_chars_pending(circ);
 			continue;
 		}
 		if (--tmout == 0)
@@ -2049,12 +2062,9 @@ do_timer:
 	 * you shouldn't be running a console on the same port as a
 	 * direct serial driver, anyway.
 	 */
-	if (port->state && (port->state->port.flags & ASYNC_INITIALIZED))
+	if (port->state->port.flags & ASYNC_INITIALIZED)
 		uart_write_wakeup(port);
 }
-
-static char console_buffer[UART_XMIT_SIZE];
-static struct uart_state console_state;
 
 static int uartdrv_console_setup(struct console *co, char *options)
 {
@@ -2093,10 +2103,12 @@ static int uartdrv_console_setup(struct console *co, char *options)
 	if (rv)
 		return rv;
 
-	state = &console_state;
-	port->state = state;
-	state->xmit.buf = console_buffer;
+	state = drv->state + co->index;
+	rv = alloc_xmit_buf(state);
+	if (rv)
+		return rv;
 	state->usflags |= UART_STATE_BOOT_ALLOCATED;
+	port->state = state;
 	uart_circ_clear(&state->xmit);
 	return 0;
 }
@@ -2516,6 +2528,10 @@ void uart_register_polled(struct uart_driver *drv)
 	mutex_unlock(&polled_list_lock);
 
 #ifdef CONFIG_SERIAL_CORE_CONSOLE
+	BUG_ON(drv->state);
+	drv->state = kzalloc(sizeof(struct uart_state) * drv->nr, GFP_KERNEL);
+	BUG_ON(!drv->state);
+	drv->flags |= UART_DRIVER_CONSOLE_ALLOCATED;
 	if (drv->nr_pollable && drv->cons &&
 					!(drv->cons->flags & CON_ENABLED)) {
 		/* We manage the consoles for this driver. */
@@ -2538,6 +2554,10 @@ EXPORT_SYMBOL(uart_register_polled);
 void uart_unregister_polled(struct uart_driver *drv)
 {
 #ifdef CONFIG_SERIAL_CORE_CONSOLE
+	BUG_ON(!drv->state || !(drv->flags & UART_DRIVER_CONSOLE_ALLOCATED));
+	kfree(drv->state);
+	drv->state = NULL;
+	drv->flags &= !UART_DRIVER_CONSOLE_ALLOCATED;
 	if (drv->nr_pollable && drv->cons)
 		unregister_console(drv->cons);
 #endif
@@ -2565,15 +2585,19 @@ int uart_register_driver(struct uart_driver *drv)
 	struct tty_driver *normal;
 	int i, retval;
 
-	BUG_ON(drv->state);
+	BUG_ON(drv->state && !(drv->flags & UART_DRIVER_CONSOLE_ALLOCATED));
 
-	/*
-	 * Maybe we should be using a slab cache for this, especially if
-	 * we have a large number of ports to handle.
-	 */
-	drv->state = kzalloc(sizeof(struct uart_state) * drv->nr, GFP_KERNEL);
-	if (!drv->state)
-		goto out;
+	if (!drv->state) {
+		/*
+		 * Maybe we should be using a slab cache for this,
+		 * especially if we have a large number of ports to
+		 * handle.
+		 */
+		drv->state = kzalloc(sizeof(struct uart_state) * drv->nr,
+				     GFP_KERNEL);
+		if (!drv->state)
+			goto out;
+	}
 
 	normal = alloc_tty_driver(drv->nr);
 	if (!normal)
@@ -2638,8 +2662,10 @@ void uart_unregister_driver(struct uart_driver *drv)
 	put_tty_driver(p);
 	for (i = 0; i < drv->nr; i++)
 		tty_port_destroy(&drv->state[i].port);
-	kfree(drv->state);
-	drv->state = NULL;
+	if (!(drv->flags & UART_DRIVER_CONSOLE_ALLOCATED)) {
+		kfree(drv->state);
+		drv->state = NULL;
+	}
 	drv->tty_driver = NULL;
 }
 
@@ -3095,7 +3121,7 @@ struct uart_port *uart_get_direct_port(char *name, int line)
 				break;
 			}
 			spin_lock_irqsave(&port->lock, flags);
-			if (port->flags & PORT_INUSE) {
+			if (port->flags & PORT_INUSE || port->state->xmit.buf) {
 				spin_unlock_irqrestore(&port->lock, flags);
 				module_put(drv->owner);
 				port = NULL;

@@ -16,7 +16,6 @@
 #include <linux/fs.h>
 #include <linux/bootmem.h>
 #include <linux/kvm_host.h>
-
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 #include <asm/mmu_context.h>
@@ -483,6 +482,9 @@ void kvm_arch_exit(void)
 #if IS_ENABLED(CONFIG_KVM_MIPS_TE)
 	kvm_mips_te_arch_exit();
 #endif
+#if IS_ENABLED(CONFIG_KVM_MIPS_VZ)
+	mipsvz_arch_exit();
+#endif
 }
 
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
@@ -563,6 +565,19 @@ int kvm_dev_ioctl_check_extension(long ext)
 	case KVM_CAP_COALESCED_MMIO:
 		r = KVM_COALESCED_MMIO_PAGE_OFFSET;
 		break;
+#else
+	case KVM_CAP_IRQCHIP:
+		r = 1;
+		break;
+	case KVM_CAP_IRQ_ROUTING:
+		r = 1;
+		break;
+	case KVM_CAP_MAX_VCPUS:
+		r = KVM_MAX_VCPUS;
+		break;
+	case KVM_CAP_IOEVENTFD:
+		r = 1;
+		break;
 #endif
 	default:
 		r = 0;
@@ -625,6 +640,169 @@ int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu)
 {
 	return vcpu->kvm->arch.ops->vcpu_setup(vcpu);
 }
+
+#ifdef CONFIG_KVM_MIPS_TE
+static
+void kvm_mips_set_c0_status(void)
+{
+	uint32_t status = read_c0_status();
+
+	if (cpu_has_dsp)
+		status |= (ST0_MX);
+
+	write_c0_status(status);
+	ehb();
+}
+
+/*
+ * Return value is in the form (errcode<<2 | RESUME_FLAG_HOST | RESUME_FLAG_NV)
+ */
+int kvm_mips_handle_exit(struct kvm_run *run, struct kvm_vcpu *vcpu)
+{
+	uint32_t cause = vcpu->arch.host_cp0_cause;
+	uint32_t exccode = (cause >> CAUSEB_EXCCODE) & 0x1f;
+	uint32_t __user *opc = (uint32_t __user *) vcpu->arch.pc;
+	unsigned long badvaddr = vcpu->arch.host_cp0_badvaddr;
+	enum emulation_result er = EMULATE_DONE;
+	int ret = RESUME_GUEST;
+
+	/* Set a default exit reason */
+	run->exit_reason = KVM_EXIT_UNKNOWN;
+	run->ready_for_interrupt_injection = 1;
+
+	/* Set the appropriate status bits based on host CPU features, before we hit the scheduler */
+	kvm_mips_set_c0_status();
+
+	local_irq_enable();
+
+	kvm_debug("kvm_mips_handle_exit: cause: %#x, PC: %p, kvm_run: %p, kvm_vcpu: %p\n",
+			cause, opc, run, vcpu);
+
+	/* Do a privilege check, if in UM most of these exit conditions end up
+	 * causing an exception to be delivered to the Guest Kernel
+	 */
+	er = kvm_mips_check_privilege(cause, opc, run, vcpu);
+	if (er == EMULATE_PRIV_FAIL) {
+		goto skip_emul;
+	} else if (er == EMULATE_FAIL) {
+		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+		ret = RESUME_HOST;
+		goto skip_emul;
+	}
+
+	switch (exccode) {
+	case T_INT:
+		kvm_debug("[%d]T_INT @ %p\n", vcpu->vcpu_id, opc);
+
+		++vcpu->stat.int_exits;
+		trace_kvm_exit(vcpu, INT_EXITS);
+
+		if (need_resched()) {
+			cond_resched();
+		}
+
+		ret = RESUME_GUEST;
+		break;
+
+	case T_COP_UNUSABLE:
+		kvm_debug("T_COP_UNUSABLE: @ PC: %p\n", opc);
+
+		++vcpu->stat.cop_unusable_exits;
+		trace_kvm_exit(vcpu, COP_UNUSABLE_EXITS);
+		ret = kvm_mips_callbacks->handle_cop_unusable(vcpu);
+		/* XXXKYMA: Might need to return to user space */
+		if (run->exit_reason == KVM_EXIT_IRQ_WINDOW_OPEN) {
+			ret = RESUME_HOST;
+		}
+		break;
+
+	case T_TLB_MOD:
+		++vcpu->stat.tlbmod_exits;
+		trace_kvm_exit(vcpu, TLBMOD_EXITS);
+		ret = kvm_mips_callbacks->handle_tlb_mod(vcpu);
+		break;
+
+	case T_TLB_ST_MISS:
+		kvm_debug
+		    ("TLB ST fault:  cause %#x, status %#lx, PC: %p, BadVaddr: %#lx\n",
+		     cause, kvm_read_c0_guest_status(vcpu->arch.cop0), opc,
+		     badvaddr);
+
+		++vcpu->stat.tlbmiss_st_exits;
+		trace_kvm_exit(vcpu, TLBMISS_ST_EXITS);
+		ret = kvm_mips_callbacks->handle_tlb_st_miss(vcpu);
+		break;
+
+	case T_TLB_LD_MISS:
+		kvm_debug("TLB LD fault: cause %#x, PC: %p, BadVaddr: %#lx\n",
+			  cause, opc, badvaddr);
+
+		++vcpu->stat.tlbmiss_ld_exits;
+		trace_kvm_exit(vcpu, TLBMISS_LD_EXITS);
+		ret = kvm_mips_callbacks->handle_tlb_ld_miss(vcpu);
+		break;
+
+	case T_ADDR_ERR_ST:
+		++vcpu->stat.addrerr_st_exits;
+		trace_kvm_exit(vcpu, ADDRERR_ST_EXITS);
+		ret = kvm_mips_callbacks->handle_addr_err_st(vcpu);
+		break;
+
+	case T_ADDR_ERR_LD:
+		++vcpu->stat.addrerr_ld_exits;
+		trace_kvm_exit(vcpu, ADDRERR_LD_EXITS);
+		ret = kvm_mips_callbacks->handle_addr_err_ld(vcpu);
+		break;
+
+	case T_SYSCALL:
+		++vcpu->stat.syscall_exits;
+		trace_kvm_exit(vcpu, SYSCALL_EXITS);
+		ret = kvm_mips_callbacks->handle_syscall(vcpu);
+		break;
+
+	case T_RES_INST:
+		++vcpu->stat.resvd_inst_exits;
+		trace_kvm_exit(vcpu, RESVD_INST_EXITS);
+		ret = kvm_mips_callbacks->handle_res_inst(vcpu);
+		break;
+
+	case T_BREAK:
+		++vcpu->stat.break_inst_exits;
+		trace_kvm_exit(vcpu, BREAK_INST_EXITS);
+		ret = kvm_mips_callbacks->handle_break(vcpu);
+		break;
+
+	default:
+		kvm_err
+		    ("Exception Code: %d, not yet handled, @ PC: %p, inst: 0x%08x  BadVaddr: %#lx Status: %#lx\n",
+		     exccode, opc, kvm_get_inst(opc, vcpu), badvaddr,
+		     kvm_read_c0_guest_status(vcpu->arch.cop0));
+		kvm_arch_vcpu_dump_regs(vcpu);
+		run->exit_reason = KVM_EXIT_INTERNAL_ERROR;
+		ret = RESUME_HOST;
+		break;
+
+	}
+
+skip_emul:
+	local_irq_disable();
+
+	if (er == EMULATE_DONE && !(ret & RESUME_HOST))
+		kvm_mips_deliver_interrupts(vcpu, cause);
+
+	if (!(ret & RESUME_HOST)) {
+		/* Only check for signals if not already exiting to userspace  */
+		if (signal_pending(current)) {
+			run->exit_reason = KVM_EXIT_INTR;
+			ret = (-EINTR << 2) | RESUME_HOST;
+			++vcpu->stat.signal_exits;
+			trace_kvm_exit(vcpu, SIGNAL_EXITS);
+		}
+	}
+
+	return ret;
+}
+#endif
 
 int __init kvm_mips_init(void)
 {

@@ -263,10 +263,11 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 	siginfo_t info;
 	void __user *pc = (void __user *)instruction_pointer(regs);
 
+#ifdef CONFIG_COMPAT
 	/* check for AArch32 breakpoint instructions */
 	if (!aarch32_break_handler(regs))
 		return;
-
+#endif
 	if (show_unhandled_signals && unhandled_signal(current, SIGILL) &&
 	    printk_ratelimit()) {
 		pr_info("%s[%d]: undefined instruction: pc=%p\n",
@@ -288,7 +289,7 @@ asmlinkage long do_ni_syscall(struct pt_regs *regs)
 {
 #ifdef CONFIG_AARCH32_EL0
 	long ret;
-	if (is_aarch32_task()) {
+	if (is_a32_compat_task()) {
 		ret = compat_arm_syscall(regs);
 		if (ret != -ENOSYS)
 			return ret;
@@ -307,16 +308,33 @@ asmlinkage long do_ni_syscall(struct pt_regs *regs)
 }
 
 /*
- * bad_mode handles the impossible case in the exception vector.
+ * bad_mode handles the impossible case in the exception vector. This is always
+ * fatal.
  */
 asmlinkage void bad_mode(struct pt_regs *regs, int reason, unsigned int esr)
+{
+	console_verbose();
+
+	pr_crit("Bad mode in %s handler detected, code 0x%08x\n",
+		handler[reason], esr);
+
+	die("Oops - bad mode", regs, 0);
+	local_irq_disable();
+	panic("bad mode");
+}
+
+/*
+ * bad_el0_sync handles unexpected, but potentially recoverable synchronous
+ * exceptions taken from EL0. Unlike bad_mode, this returns.
+ */
+asmlinkage void bad_el0_sync(struct pt_regs *regs, int reason, unsigned int esr)
 {
 	siginfo_t info;
 	void __user *pc = (void __user *)instruction_pointer(regs);
 	console_verbose();
 
-	pr_crit("Bad mode in %s handler detected, code 0x%08x\n",
-		handler[reason], esr);
+	pr_crit("Bad EL0 synchronous exception detected on CPU%d, code 0x%08x\n",
+		smp_processor_id(), esr);
 	__show_regs(regs);
 
 	info.si_signo = SIGILL;
@@ -324,7 +342,7 @@ asmlinkage void bad_mode(struct pt_regs *regs, int reason, unsigned int esr)
 	info.si_code  = ILL_ILLOPC;
 	info.si_addr  = pc;
 
-	arm64_notify_die("Oops - bad mode", regs, &info, 0);
+	force_sig_info(info.si_signo, &info, current);
 }
 
 void __pte_error(const char *file, int line, unsigned long val)
@@ -337,13 +355,6 @@ void __pmd_error(const char *file, int line, unsigned long val)
 	printk("%s:%d: bad pmd %016lx.\n", file, line, val);
 }
 
-#ifndef CONFIG_ARM64_64K_PAGES
-void __pud_error(const char *file, int line, unsigned long val)
-{
-	printk("%s:%d: bad pud %016lx.\n", file, line, val);
-}
-#endif
-
 void __pgd_error(const char *file, int line, unsigned long val)
 {
 	printk("%s:%d: bad pgd %016lx.\n", file, line, val);
@@ -353,3 +364,50 @@ void __init trap_init(void)
 {
 	return;
 }
+
+#ifdef CONFIG_PAX_KERNEXEC
+#include <linux/percpu.h>
+
+DEFINE_PER_CPU(unsigned long , pax_set_ttbr1_to_rwx);
+
+void pax_enter_irq(void)
+{
+	if (this_cpu_read(pax_set_ttbr1_to_rwx)) {
+		unsigned long ttbr;
+		ttbr = __pa(swapper_pg_dir);
+		
+		asm(
+		"	msr	ttbr1_el1, %0			// set TTBR0\n"
+		"	isb"
+		:
+		: "r" (ttbr));
+		
+		/* flush all tlb entries */	
+		dsb();
+		asm("tlbi	vmalle1is");
+		dsb();
+		isb();
+	}
+}
+
+void pax_exit_irq(void)
+{
+	if (this_cpu_read(pax_set_ttbr1_to_rwx)) {
+		unsigned long ttbr;
+		ttbr = __pa(swapper_pg_dir_pax);
+		
+		asm(
+		"	msr	ttbr1_el1, %0			// set TTBR0\n"
+		"	isb"
+		:
+		: "r" (ttbr));
+		
+		/* flush all tlb entries */	
+		dsb();
+		asm("tlbi	vmalle1is");
+		dsb();
+		isb();
+	}
+}
+#endif
+

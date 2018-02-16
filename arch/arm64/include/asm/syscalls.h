@@ -24,8 +24,9 @@
  * System call wrappers implemented in kernel/entry.S.
  */
 asmlinkage long sys_rt_sigreturn_wrapper(void);
+
 #ifdef CONFIG_ARM64_ILP32
-asmlinkage long sys_ilp32_rt_sigreturn_wrapper(void);
+long ilp32_sys_sigaltstack(const stack_t __user *, stack_t __user *);
 #endif
 
 #include <asm-generic/syscalls.h>

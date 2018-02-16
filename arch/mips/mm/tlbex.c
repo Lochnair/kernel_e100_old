@@ -36,6 +36,25 @@
 #include <asm/uasm.h>
 #include <asm/setup.h>
 
+#if IS_ENABLED(CONFIG_KVM_MIPS_VZ)
+#define refill_init_section
+#define refill_initdata_section
+#else
+#define refill_init_section __cpuinit
+#define refill_initdata_section __cpuinitdata
+#endif
+
+#ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
+#define restore_fast_access_to_thread_pointer(t)		\
+	do {							\
+		/* K0 = thread pointer */			\
+		UASM_i_LW(t, K0, FAST_ACCESS_THREAD_OFFSET, 0);	\
+	} while (0)
+#else
+#define restore_fast_access_to_thread_pointer(t)		\
+	do { } while (0)
+#endif
+
 /*
  * TLB load/store/modify handlers.
  *
@@ -105,23 +124,14 @@ static int use_lwx_insns(void)
 		return 0;
 	}
 }
-#if defined(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE) && \
-    CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
 static bool scratchpad_available(void)
 {
 	return true;
 }
 static int scratchpad_offset(int i)
 {
-	/*
-	 * CVMSEG starts at address -32768 and extends for
-	 * CAVIUM_OCTEON_CVMSEG_SIZE 128 byte cache lines.
-	 *
-	 * FAST_ACCESS_THREAD_OFFSET is at the top.  TLB related work
-	 * down from there.
-	 */
-	i += 2;
-	return CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE * 128 - (8 * i) - 32768;
+	return CAVIUM_OCTEON_SCRATCH_OFFSET - (8 * i);
 }
 #else
 static bool scratchpad_available(void)
@@ -303,16 +313,16 @@ static inline void dump_handler(const char *symbol, const u32 *handler, int coun
  * We deliberately chose a buffer size of 128, so we won't scribble
  * over anything important on overflow before we panic.
  */
-static u32 tlb_handler[128] __cpuinitdata;
+static u32 tlb_handler[128] refill_initdata_section;
 
 /* simply assume worst case size for labels and relocs */
-static struct uasm_label labels[128] __cpuinitdata;
-static struct uasm_reloc relocs[128] __cpuinitdata;
+static struct uasm_label labels[128] refill_initdata_section;
+static struct uasm_reloc relocs[128] refill_initdata_section;
 
-static int check_for_high_segbits __cpuinitdata;
+static int check_for_high_segbits refill_initdata_section;
 
-static int scratch_reg __cpuinitdata;
-static int pgd_reg __cpuinitdata;
+static int scratch_reg refill_initdata_section;
+static int pgd_reg refill_initdata_section;
 enum vmalloc64_mode {not_refill, refill_scratch, refill_noscratch};
 
 static struct work_registers __cpuinit build_get_work_registers(u32 **p)
@@ -384,10 +394,6 @@ static void __cpuinit build_restore_work_registers(u32 **p)
 {
 	if (scratch_reg > 0) {
 		UASM_i_MFC0(p, 1, 31, scratch_reg);
-#ifdef CONFIG_KVM_MIPS_VZ
-		UASM_i_MFC0(p, K0, 31, 2);
-		UASM_i_MFC0(p, K1, 31, 3);
-#endif
 		return;
 	}
 #ifdef TEMPORARY_SCRATCHPAD_FOR_KERNEL_OFFSET
@@ -397,10 +403,6 @@ static void __cpuinit build_restore_work_registers(u32 **p)
 	UASM_i_LW(p, 1, offsetof(struct tlb_reg_save, a), K0);
 	UASM_i_LW(p, 2, offsetof(struct tlb_reg_save, b), K0);
 #endif /* TEMPORARY_SCRATCHPAD_FOR_KERNEL_OFFSET */
-#ifdef CONFIG_KVM_MIPS_VZ
-	UASM_i_MFC0(p, K0, 31, 2);
-	UASM_i_MFC0(p, K1, 31, 3);
-#endif
 }
 
 #ifndef CONFIG_MIPS_PGD_C0_CONTEXT
@@ -462,7 +464,7 @@ static void __cpuinit build_r3000_tlb_refill_handler(void)
  * other one.To keep things simple, we first assume linear space,
  * then we relocate it to the final handler layout as needed.
  */
-static u32 final_handler[64] __cpuinitdata;
+static u32 final_handler[64] refill_initdata_section;
 
 /*
  * Hazards
@@ -510,9 +512,9 @@ static void __cpuinit __maybe_unused build_tlb_probe_entry(u32 **p)
  */
 enum tlb_write_entry { tlb_random, tlb_indexed };
 
-static void __cpuinit build_tlb_write_entry(u32 **p, struct uasm_label **l,
-					 struct uasm_reloc **r,
-					 enum tlb_write_entry wmode)
+static void refill_init_section
+build_tlb_write_entry(u32 **p, struct uasm_label **l, struct uasm_reloc **r,
+		      enum tlb_write_entry wmode)
 {
 	void(*tlbw)(u32 **) = NULL;
 
@@ -533,7 +535,8 @@ static void __cpuinit build_tlb_write_entry(u32 **p, struct uasm_label **l,
 			break;
 
 		default:
-			uasm_i_ehb(p);
+			if (cpu_has_mips_r2_exec_hazard)
+				uasm_i_ehb(p);
 			break;
 		}
 		tlbw(p);
@@ -705,12 +708,10 @@ static __cpuinit void build_restore_pagemask(u32 **p,
 	}
 }
 
-static __cpuinit void build_huge_tlb_write_entry(u32 **p,
-						 struct uasm_label **l,
-						 struct uasm_reloc **r,
-						 unsigned int tmp,
-						 enum tlb_write_entry wmode,
-						 int restore_scratch)
+static refill_init_section void
+build_huge_tlb_write_entry(u32 **p, struct uasm_label **l,
+			   struct uasm_reloc **r, unsigned int tmp,
+			   enum tlb_write_entry wmode, int restore_scratch)
 {
 	/* Set huge page tlb entry size */
 	uasm_i_lui(p, tmp, PM_HUGE_MASK >> 16);
@@ -725,7 +726,7 @@ static __cpuinit void build_huge_tlb_write_entry(u32 **p,
 /*
  * Check if Huge PTE is present, if so then jump to LABEL.
  */
-static void __cpuinit
+static void refill_init_section
 build_is_huge_pte(u32 **p, struct uasm_reloc **r, unsigned int tmp,
 		unsigned int pmd, int lid)
 {
@@ -738,9 +739,8 @@ build_is_huge_pte(u32 **p, struct uasm_reloc **r, unsigned int tmp,
 	}
 }
 
-static __cpuinit void build_huge_update_entries(u32 **p,
-						unsigned int pte,
-						unsigned int tmp)
+static refill_init_section void
+build_huge_update_entries(u32 **p, unsigned int pte, unsigned int tmp)
 {
 	int small_sequence;
 
@@ -793,7 +793,7 @@ static __cpuinit void build_huge_handler_tail(u32 **p,
  * TMP and PTR are scratch.
  * TMP will be clobbered, PTR will hold the pmd entry.
  */
-static void __cpuinit
+static void refill_init_section
 build_get_pmde64(u32 **p, struct uasm_label **l, struct uasm_reloc **r,
 		 unsigned int tmp, unsigned int ptr)
 {
@@ -885,10 +885,10 @@ build_get_pmde64(u32 **p, struct uasm_label **l, struct uasm_reloc **r,
  * BVADDR is the faulting address, PTR is scratch.
  * PTR will hold the pgd for vmalloc.
  */
-static void __cpuinit
+static void refill_init_section
 build_get_pgd_vmalloc64(u32 **p, struct uasm_label **l, struct uasm_reloc **r,
 			unsigned int bvaddr, unsigned int ptr,
-			enum vmalloc64_mode mode)
+			enum vmalloc64_mode mode, bool kvm_root)
 {
 	long swpd = (long)swapper_pg_dir;
 	int single_insn_swpd;
@@ -935,16 +935,35 @@ build_get_pgd_vmalloc64(u32 **p, struct uasm_label **l, struct uasm_reloc **r,
 		 * to mimic that here by taking a load/istream page
 		 * fault.
 		 */
-		UASM_i_LA(p, ptr, (unsigned long)tlb_do_page_fault_0);
-		uasm_i_jr(p, ptr);
-
-		if (mode == refill_scratch) {
-			if (scratch_reg > 0)
-				UASM_i_MFC0(p, 1, 31, scratch_reg);
-			else
-				UASM_i_LW(p, 1, scratchpad_offset(0), 0);
+		if (kvm_root) {
+			UASM_i_MTC0(p, 0, C0_ENTRYLO0); /* Invalid */
+			UASM_i_MTC0(p, 0, C0_ENTRYLO1); /* Invalid */
+			build_tlb_write_entry(p, l, r, tlb_random);
+			if (mode == refill_scratch) {
+				if (scratch_reg > 0)
+					UASM_i_MFC0(p, 1, 31, scratch_reg);
+				else
+					UASM_i_LW(p, 1, scratchpad_offset(0), 0);
+			}
+			UASM_i_MFC0(p, K0, 31, 2);
+			UASM_i_MFC0(p, K1, 31, 3);
+#ifdef CONFIG_CAVIUM_ERET_MISPREDICT_WORKAROUND
+			/* force misprediction for ERET */
+			UASM_i_MTC0(p, 0, 30, 7);
+#endif
+			uasm_i_eret(p); /* return from trap */
 		} else {
-			uasm_i_nop(p);
+			UASM_i_LA(p, ptr, (unsigned long)tlb_do_page_fault_0);
+			uasm_i_jr(p, ptr);
+
+			if (mode == refill_scratch) {
+				if (scratch_reg > 0)
+					UASM_i_MFC0(p, 1, 31, scratch_reg);
+				else
+					UASM_i_LW(p, 1, scratchpad_offset(0), 0);
+			} else {
+				uasm_i_nop(p);
+			}
 		}
 	}
 }
@@ -990,7 +1009,8 @@ build_get_pgde32(u32 **p, unsigned int tmp, unsigned int ptr)
 
 #endif /* !CONFIG_64BIT */
 
-static void __cpuinit build_adjust_context(u32 **p, unsigned int ctx)
+static void refill_init_section
+build_adjust_context(u32 **p, unsigned int ctx)
 {
 	unsigned int shift = 4 - (PTE_T_LOG2 + 1) + PAGE_SHIFT - 12;
 	unsigned int mask = (PTRS_PER_PTE / 2 - 1) << (PTE_T_LOG2 + 1);
@@ -1041,8 +1061,9 @@ static void __cpuinit build_get_ptep(u32 **p, unsigned int tmp, unsigned int ptr
 	UASM_i_ADDU(p, ptr, ptr, tmp); /* add in offset */
 }
 
-static void __cpuinit build_update_entries(u32 **p, unsigned int tmp,
-					unsigned int ptep)
+static void refill_init_section
+build_update_entries(u32 **p, unsigned int tmp,
+		     unsigned int ptep)
 {
 	/*
 	 * 64bit address support (36bit on a 32bit CPU) in a 32bit
@@ -1101,25 +1122,27 @@ static void __cpuinit build_update_entries(u32 **p, unsigned int tmp,
 struct mips_huge_tlb_info {
 	int huge_pte;
 	int restore_scratch;
+	bool need_reload_pte;
 };
 
-static struct mips_huge_tlb_info __cpuinit
+static struct mips_huge_tlb_info refill_init_section
 build_fast_tlb_refill_handler (u32 **p, struct uasm_label **l,
 			       struct uasm_reloc **r, unsigned int tmp,
-			       unsigned int ptr, int c0_scratch)
+			       unsigned int ptr, int c0_scratch, bool kvm_root)
 {
 	struct mips_huge_tlb_info rv;
 	unsigned int even, odd;
 	int vmalloc_branch_delay_filled = 0;
 	const int scratch = 1; /* Our extra working register */
 
-#ifdef CONFIG_KVM_MIPS_VZ
-	UASM_i_MTC0(p, K0, 31, 2);
-	UASM_i_MTC0(p, K1, 31, 3);
-#endif
+	if (kvm_root) {
+		UASM_i_MTC0(p, K0, 31, 2);
+		UASM_i_MTC0(p, K1, 31, 3);
+	}
 
 	rv.huge_pte = scratch;
 	rv.restore_scratch = 0;
+	rv.need_reload_pte = false;
 
 	if (check_for_high_segbits) {
 		UASM_i_MFC0(p, tmp, C0_BADVADDR);
@@ -1261,31 +1284,31 @@ build_fast_tlb_refill_handler (u32 **p, struct uasm_label **l,
 		UASM_i_MFC0(p, scratch, 31, c0_scratch);
 		build_tlb_write_entry(p, l, r, tlb_random);
 		uasm_l_leave(l, *p);
-#ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-		UASM_i_MFC0(p, K0, 4, 2);
-#endif
+		if (!kvm_root)
+			UASM_i_MFC0(p, K0, 4, 2);
 		rv.restore_scratch = 1;
 	} else if (PAGE_SHIFT == 14 || PAGE_SHIFT == 13)  {
 		build_tlb_write_entry(p, l, r, tlb_random);
 		uasm_l_leave(l, *p);
 		UASM_i_LW(p, scratch, scratchpad_offset(0), 0);
-#ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-		UASM_i_LW(p, K0, FAST_ACCESS_THREAD_OFFSET, 0);  /* K0 = thread pointer */
-#endif
+		if (!kvm_root)
+			restore_fast_access_to_thread_pointer(p);
 	} else {
 		UASM_i_LW(p, scratch, scratchpad_offset(0), 0);
 		build_tlb_write_entry(p, l, r, tlb_random);
 		uasm_l_leave(l, *p);
-#ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-		UASM_i_LW(p, K0, FAST_ACCESS_THREAD_OFFSET, 0);  /* K0 = thread pointer */
-#endif
+		if (!kvm_root)
+			restore_fast_access_to_thread_pointer(p);
 		rv.restore_scratch = 1;
 	}
-
-#ifdef CONFIG_KVM_MIPS_VZ
-	UASM_i_MFC0(p, K0, 31, 2);
-	UASM_i_MFC0(p, K1, 31, 3);
+	if (kvm_root) {
+		UASM_i_MFC0(p, K0, 31, 2);
+		UASM_i_MFC0(p, K1, 31, 3);
+#ifdef CONFIG_CAVIUM_ERET_MISPREDICT_WORKAROUND
+		/* force misprediction for ERET */
+		UASM_i_MTC0(p, 0, 30, 7);
 #endif
+	}
 	uasm_i_eret(p); /* return from trap */
 
 	return rv;
@@ -1298,8 +1321,17 @@ build_fast_tlb_refill_handler (u32 **p, struct uasm_label **l,
  * unused TLB refill exception.
  */
 #define MIPS64_REFILL_INSNS 32
-
-static void __cpuinit build_r4000_tlb_refill_handler(void)
+/**
+ * build_r4000_tlb_refill_handler - synthesize a r4000 style TLB Refill handler.
+ *
+ * @loc - Final location of the handler, the code is copied to here.
+ *
+ * @kvm_root - If true, K0 and K1 registers are preserved.  Otherwise,
+ *             they are clobbered by the handler.
+ *
+ */
+void refill_init_section
+build_r4000_tlb_refill_handler(void *loc, bool kvm_root)
 {
 	u32 *p = tlb_handler;
 	struct uasm_label *l = labels;
@@ -1317,15 +1349,16 @@ static void __cpuinit build_r4000_tlb_refill_handler(void)
 	if (IS_ENABLED(CONFIG_64BIT) &&
 	    (scratch_reg > 0 || scratchpad_available()) && use_bbit_insns()) {
 		htlb_info = build_fast_tlb_refill_handler(&p, &l, &r, K0, K1,
-							  scratch_reg);
+							  scratch_reg, kvm_root);
 		vmalloc_mode = refill_scratch;
 	} else {
-#ifdef CONFIG_KVM_MIPS_VZ
-	  UASM_i_MTC0(&p, K0, 31, 2);
-	  UASM_i_MTC0(&p, K1, 31, 3);
-#endif
+		if (kvm_root) {
+			UASM_i_MTC0(&p, K0, 31, 2);
+			UASM_i_MTC0(&p, K1, 31, 3);
+		}
 		htlb_info.huge_pte = K0;
 		htlb_info.restore_scratch = 0;
+		htlb_info.need_reload_pte = true;
 		vmalloc_mode = refill_noscratch;
 		/*
 		 * create the plain linear handler
@@ -1358,23 +1391,28 @@ static void __cpuinit build_r4000_tlb_refill_handler(void)
 		build_update_entries(&p, K0, K1);
 		build_tlb_write_entry(&p, &l, &r, tlb_random);
 		uasm_l_leave(&l, p);
-#ifdef CONFIG_KVM_MIPS_VZ
-		UASM_i_MFC0(&p, K0, 31, 2);
-		UASM_i_MFC0(&p, K1, 31, 3);
-#elif defined(CONFIG_FAST_ACCESS_TO_THREAD_POINTER)
-		UASM_i_LW(&p, K0, FAST_ACCESS_THREAD_OFFSET, 0);  /* K0 = thread ptr */
+		if (kvm_root) {
+			UASM_i_MFC0(&p, K0, 31, 2);
+			UASM_i_MFC0(&p, K1, 31, 3);
+#ifdef CONFIG_CAVIUM_ERET_MISPREDICT_WORKAROUND
+			/* force misprediction for ERET */
+			UASM_i_MTC0(&p, 0, 30, 7);
 #endif
+		} else
+			restore_fast_access_to_thread_pointer(&p);
 		uasm_i_eret(&p); /* return from trap */
 	}
 #ifdef CONFIG_MIPS_HUGE_TLB_SUPPORT
 	uasm_l_tlb_huge_update(&l, p);
+	if (htlb_info.need_reload_pte)
+		UASM_i_LW(&p, htlb_info.huge_pte, 0, K1);
 	build_huge_update_entries(&p, htlb_info.huge_pte, K1);
 	build_huge_tlb_write_entry(&p, &l, &r, K0, tlb_random,
 				   htlb_info.restore_scratch);
 #endif
 
 #ifdef CONFIG_64BIT
-	build_get_pgd_vmalloc64(&p, &l, &r, K0, K1, vmalloc_mode);
+	build_get_pgd_vmalloc64(&p, &l, &r, K0, K1, vmalloc_mode, kvm_root);
 #endif
 
 	/*
@@ -1478,11 +1516,13 @@ static void __cpuinit build_r4000_tlb_refill_handler(void)
 	pr_debug("Wrote TLB refill handler (%u instructions).\n",
 		 final_len);
 
-	memcpy((void *)ebase, final_handler, 0x100);
+	memcpy(loc, final_handler, 0x100);
 
-	dump_handler("r4000_tlb_refill", (u32 *)ebase, 64);
+	dump_handler("r4000_tlb_refill", loc, 64);
 }
-
+#if IS_ENABLED(CONFIG_KVM_MIPS_VZ)
+EXPORT_SYMBOL_GPL(build_r4000_tlb_refill_handler);
+#endif
 /*
  * 128 instructions for the fastpath handler is generous and should
  * never be exceeded.
@@ -1935,13 +1975,11 @@ build_r4000_tlbchange_handler_tail(u32 **p, struct uasm_label **l,
 	build_tlb_write_entry(p, l, r, tlb_indexed);
 	uasm_l_leave(l, *p);
 	build_restore_work_registers(p);
-#ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-	UASM_i_LW(p, K0, FAST_ACCESS_THREAD_OFFSET, 0);  /* K0 = thread ptr */
-#endif
+	restore_fast_access_to_thread_pointer(p);
 	uasm_i_eret(p); /* return from trap */
 
 #ifdef CONFIG_64BIT
-	build_get_pgd_vmalloc64(p, l, r, tmp, ptr, not_refill);
+	build_get_pgd_vmalloc64(p, l, r, tmp, ptr, not_refill, false);
 #endif
 }
 
@@ -2268,11 +2306,11 @@ void __cpuinit build_tlb_refill_handler(void)
 			build_r4000_tlb_store_handler();
 			build_r4000_tlb_modify_handler();
 			if (!cpu_has_local_ebase)
-				build_r4000_tlb_refill_handler();
+				build_r4000_tlb_refill_handler((void *)ebase, false);
 			run_once++;
 		}
 		if (cpu_has_local_ebase)
-			build_r4000_tlb_refill_handler();
+			build_r4000_tlb_refill_handler((void *)ebase, false);
 	}
 }
 

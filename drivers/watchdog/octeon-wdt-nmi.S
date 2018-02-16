@@ -19,8 +19,6 @@
 	.set 	noat
 	/* Clear Dcache so cvmseg works right. */
 	cache	1,0($0)
-	/* Save K0 into the debug scratch register */
-	dmtc0	k0, $31
 	/* Use K0 to do a read/modify/write of CVMMEMCTL */
 	dmfc0	k0, $11, 7
 	/* Clear out the size of CVMSEG	*/
@@ -29,7 +27,10 @@
 	ori	k0, k0, 0x1c0 | 54
 	/* Store the CVMMEMCTL value */
 	dmtc0	k0, $11, 7
-	/* Restore K0 from the debug scratch register */
+	/*
+	 * Restore K0 from the debug scratch register, it was saved in
+	 * the boot-vector code.
+	 */
 	dmfc0	k0, $31
 
 	/*

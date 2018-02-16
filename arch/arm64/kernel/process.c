@@ -84,11 +84,6 @@ EXPORT_SYMBOL_GPL(pm_power_off);
 void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
 EXPORT_SYMBOL_GPL(arm_pm_restart);
 
-void arch_cpu_idle_prepare(void)
-{
-	local_fiq_enable();
-}
-
 /*
  * This is our default idle handler.
  */
@@ -136,7 +131,6 @@ void machine_restart(char *cmd)
 
 	/* Disable interrupts first */
 	local_irq_disable();
-	local_fiq_disable();
 
 	/* Now call the architecture specific reboot code. */
 	if (arm_pm_restart)
@@ -180,9 +174,27 @@ void exit_thread(void)
 {
 }
 
+static void tls_thread_flush(void)
+{
+	asm ("msr tpidr_el0, xzr");
+
+	if (is_compat_task()) {
+		current->thread.tp_value = 0;
+
+		/*
+		 * We need to ensure ordering between the shadow state and the
+		 * hardware state, so that we don't corrupt the hardware state
+		 * with a stale shadow state during context switch.
+		 */
+		barrier();
+		asm ("msr tpidrro_el0, xzr");
+	}
+}
+
 void flush_thread(void)
 {
 	fpsimd_flush_thread();
+	tls_thread_flush();
 	flush_ptrace_hw_breakpoint(current);
 }
 
@@ -210,7 +222,7 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 	if (likely(!(p->flags & PF_KTHREAD))) {
 		*childregs = *current_pt_regs();
 		childregs->regs[0] = 0;
-		if (is_aarch32_thread(task_thread_info(p))) {
+		if (is_a32_compat_thread(task_thread_info(p))) {
 			if (stack_start)
 				childregs->compat_sp = stack_start;
 		} else {
@@ -251,12 +263,12 @@ static void tls_thread_switch(struct task_struct *next)
 {
 	unsigned long tpidr, tpidrro;
 
-	if (!is_aarch32_task()) {
+	if (!is_a32_compat_task()) {
 		asm("mrs %0, tpidr_el0" : "=r" (tpidr));
 		current->thread.tp_value = tpidr;
 	}
 
-	if (is_aarch32_thread(task_thread_info(next))) {
+	if (is_a32_compat_thread(task_thread_info(next))) {
 		tpidr = 0;
 		tpidrro = next->thread.tp_value;
 	} else {
@@ -337,19 +349,3 @@ unsigned long randomize_et_dyn(unsigned long base)
 {
 	return randomize_base(base);
 }
-
-#ifdef CONFIG_AARCH32_EL0
-void compat_start_thread(struct pt_regs *regs, unsigned long pc,
-			 unsigned long sp)
-{
-        if(is_ilp32_compat_task())
-                return start_thread(regs,pc,sp);
-
-        start_thread_common(regs, pc);
-        regs->pstate = COMPAT_PSR_MODE_USR;
-        if (pc & 1)
-                regs->pstate |= COMPAT_PSR_T_BIT;
-        regs->compat_sp = sp;
-}
-#endif
-

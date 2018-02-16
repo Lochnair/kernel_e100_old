@@ -14,6 +14,7 @@
 
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-uctlx-defs.h>
+#include <asm/octeon/cvmx-uahcx-defs.h>
 
 static DEFINE_MUTEX(octeon2_usb_clocks_mutex);
 
@@ -233,3 +234,30 @@ void octeon2_usb_clocks_stop(void)
 	mutex_unlock(&octeon2_usb_clocks_mutex);
 }
 EXPORT_SYMBOL(octeon2_usb_clocks_stop);
+
+static int __init octeon2_usb_reset(void)
+{
+	union cvmx_uctlx_clk_rst_ctl clk_rst_ctl;
+	union cvmx_uahcx_ehci_usbcmd ehci_usbcmd;
+	union cvmx_uahcx_ohci0_hccommandstatus ohci_usbcmd;
+
+	if (!OCTEON_IS_OCTEON2())
+		return 0;
+
+	clk_rst_ctl.u64 = cvmx_read_csr(CVMX_UCTLX_CLK_RST_CTL(0));
+	if (clk_rst_ctl.s.hrst) {
+		ehci_usbcmd.u32 = cvmx_read64_uint32(CVMX_UAHCX_EHCI_USBCMD(0));
+		ehci_usbcmd.s.rs = 0;
+		cvmx_write64_uint32(CVMX_UAHCX_EHCI_USBCMD(0), ehci_usbcmd.u32);
+		mdelay(2);
+		ehci_usbcmd.s.hcreset = 1;
+		cvmx_write64_uint32(CVMX_UAHCX_EHCI_USBCMD(0), ehci_usbcmd.u32);
+		ohci_usbcmd.u32 = cvmx_read64_uint32(CVMX_UAHCX_OHCI0_HCCOMMANDSTATUS(0));
+		ohci_usbcmd.s.hcr = 1;
+		cvmx_write64_uint32(CVMX_UAHCX_OHCI0_HCCOMMANDSTATUS(0), ohci_usbcmd.u32);
+
+	}
+	return 0;
+}
+
+arch_initcall(octeon2_usb_reset);

@@ -286,8 +286,8 @@ int poll_select_set_timeout(struct timespec *to, long sec, long nsec)
 	return 0;
 }
 
-int poll_select_copy_remaining(struct timespec *end_time, void __user *p,
-			       int timeval, int ret)
+static int poll_select_copy_remaining(struct timespec *end_time, void __user *p,
+				      int timeval, int ret)
 {
 	struct timespec rts;
 	struct timeval rtv;

@@ -1,6 +1,7 @@
 #include "kvm/devices.h"
 #include "kvm/pci.h"
 #include "kvm/ioport.h"
+#include "kvm/irq.h"
 #include "kvm/util.h"
 #include "kvm/kvm.h"
 
@@ -18,12 +19,28 @@ static u32 pci_config_address_bits;
  */
 static u32 io_space_blocks		= KVM_PCI_MMIO_AREA;
 
+/*
+ * BARs must be naturally aligned, so enforce this in the allocator.
+ */
 u32 pci_get_io_space_block(u32 size)
 {
-	u32 block = io_space_blocks;
-	io_space_blocks += size;
-
+	u32 block = ALIGN(io_space_blocks, size);
+	io_space_blocks = block + size;
 	return block;
+}
+
+void pci__assign_irq(struct device_header *dev_hdr)
+{
+	struct pci_device_header *pci_hdr = dev_hdr->data;
+
+	/*
+	 * PCI supports only INTA#,B#,C#,D# per device.
+	 *
+	 * A#,B#,C#,D# are allowed for multifunctional devices so stick
+	 * with A# for our single function devices.
+	 */
+	pci_hdr->irq_pin	= 1;
+	pci_hdr->irq_line	= irq__alloc_line();
 }
 
 static void *pci_config_address_ptr(u16 port)
@@ -37,7 +54,7 @@ static void *pci_config_address_ptr(u16 port)
 	return base + offset;
 }
 
-static bool pci_config_address_out(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool pci_config_address_out(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	void *p = pci_config_address_ptr(port);
 
@@ -46,7 +63,7 @@ static bool pci_config_address_out(struct ioport *ioport, struct kvm *kvm, u16 p
 	return true;
 }
 
-static bool pci_config_address_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool pci_config_address_in(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	void *p = pci_config_address_ptr(port);
 
@@ -75,7 +92,7 @@ static bool pci_device_exists(u8 bus_number, u8 device_number, u8 function_numbe
 	return !IS_ERR_OR_NULL(device__find_dev(DEVICE_BUS_PCI, device_number));
 }
 
-static bool pci_config_data_out(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool pci_config_data_out(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	union pci_config_address pci_config_address;
 
@@ -86,12 +103,12 @@ static bool pci_config_data_out(struct ioport *ioport, struct kvm *kvm, u16 port
 	 */
 	pci_config_address.reg_offset = port - PCI_CONFIG_DATA;
 
-	pci__config_wr(kvm, pci_config_address, data, size);
+	pci__config_wr(vcpu->kvm, pci_config_address, data, size);
 
 	return true;
 }
 
-static bool pci_config_data_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool pci_config_data_in(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	union pci_config_address pci_config_address;
 
@@ -102,7 +119,7 @@ static bool pci_config_data_in(struct ioport *ioport, struct kvm *kvm, u16 port,
 	 */
 	pci_config_address.reg_offset = port - PCI_CONFIG_DATA;
 
-	pci__config_rd(kvm, pci_config_address, data, size);
+	pci__config_rd(vcpu->kvm, pci_config_address, data, size);
 
 	return true;
 }
@@ -172,6 +189,21 @@ void pci__config_rd(struct kvm *kvm, union pci_config_address addr, void *data, 
 	}
 }
 
+static void pci_config_mmio_access(struct kvm_cpu *vcpu, u64 addr, u8 *data,
+				   u32 len, u8 is_write, void *kvm)
+{
+	union pci_config_address cfg_addr;
+
+	addr			-= KVM_PCI_CFG_AREA;
+	cfg_addr.w		= (u32)addr;
+	cfg_addr.enable_bit	= 1;
+
+	if (is_write)
+		pci__config_wr(kvm, cfg_addr, data, len);
+	else
+		pci__config_rd(kvm, cfg_addr, data, len);
+}
+
 struct pci_device_header *pci__find_dev(u8 dev_num)
 {
 	struct device_header *hdr = device__find_dev(DEVICE_BUS_PCI, dev_num);
@@ -191,12 +223,21 @@ int pci__init(struct kvm *kvm)
 		return r;
 
 	r = ioport__register(kvm, PCI_CONFIG_ADDRESS + 0, &pci_config_address_ops, 4, NULL);
-	if (r < 0) {
-		ioport__unregister(kvm, PCI_CONFIG_DATA);
-		return r;
-	}
+	if (r < 0)
+		goto err_unregister_data;
+
+	r = kvm__register_mmio(kvm, KVM_PCI_CFG_AREA, PCI_CFG_SIZE, false,
+			       pci_config_mmio_access, kvm);
+	if (r < 0)
+		goto err_unregister_addr;
 
 	return 0;
+
+err_unregister_addr:
+	ioport__unregister(kvm, PCI_CONFIG_ADDRESS);
+err_unregister_data:
+	ioport__unregister(kvm, PCI_CONFIG_DATA);
+	return r;
 }
 dev_base_init(pci__init);
 

@@ -464,31 +464,13 @@ static void device_remove_bin_attributes(struct device *dev,
 static int device_add_groups(struct device *dev,
 			     const struct attribute_group **groups)
 {
-	int error = 0;
-	int i;
-
-	if (groups) {
-		for (i = 0; groups[i]; i++) {
-			error = sysfs_create_group(&dev->kobj, groups[i]);
-			if (error) {
-				while (--i >= 0)
-					sysfs_remove_group(&dev->kobj,
-							   groups[i]);
-				break;
-			}
-		}
-	}
-	return error;
+	return sysfs_create_groups(&dev->kobj, groups);
 }
 
 static void device_remove_groups(struct device *dev,
 				 const struct attribute_group **groups)
 {
-	int i;
-
-	if (groups)
-		for (i = 0; groups[i]; i++)
-			sysfs_remove_group(&dev->kobj, groups[i]);
+	sysfs_remove_groups(&dev->kobj, groups);
 }
 
 static int device_add_attrs(struct device *dev)
@@ -498,9 +480,12 @@ static int device_add_attrs(struct device *dev)
 	int error;
 
 	if (class) {
-		error = device_add_attributes(dev, class->dev_attrs);
+		error = device_add_groups(dev, class->dev_groups);
 		if (error)
 			return error;
+		error = device_add_attributes(dev, class->dev_attrs);
+		if (error)
+			goto err_remove_class_groups;
 		error = device_add_bin_attributes(dev, class->dev_bin_attrs);
 		if (error)
 			goto err_remove_class_attrs;
@@ -527,6 +512,9 @@ static int device_add_attrs(struct device *dev)
  err_remove_class_attrs:
 	if (class)
 		device_remove_attributes(dev, class->dev_attrs);
+ err_remove_class_groups:
+	if (class)
+		device_remove_groups(dev, class->dev_groups);
 
 	return error;
 }
@@ -544,6 +532,7 @@ static void device_remove_attrs(struct device *dev)
 	if (class) {
 		device_remove_attributes(dev, class->dev_attrs);
 		device_remove_bin_attributes(dev, class->dev_bin_attrs);
+		device_remove_groups(dev, class->dev_groups);
 	}
 }
 
@@ -765,12 +754,12 @@ class_dir_create_and_add(struct class *class, struct kobject *parent_kobj)
 	return &dir->kobj;
 }
 
+static DEFINE_MUTEX(gdp_mutex);
 
 static struct kobject *get_device_parent(struct device *dev,
 					 struct device *parent)
 {
 	if (dev->class) {
-		static DEFINE_MUTEX(gdp_mutex);
 		struct kobject *kobj = NULL;
 		struct kobject *parent_kobj;
 		struct kobject *k;
@@ -827,19 +816,34 @@ static struct kobject *get_device_parent(struct device *dev,
 	return NULL;
 }
 
+static inline bool live_in_glue_dir(struct kobject *kobj,
+				    struct device *dev)
+{
+	if (!kobj || !dev->class ||
+	    kobj->kset != &dev->class->p->glue_dirs)
+		return false;
+	return true;
+}
+
+static inline struct kobject *get_glue_dir(struct device *dev)
+{
+	return dev->kobj.parent;
+}
+
+/*
+ * make sure cleaning up dir as the last step, we need to make
+ * sure .release handler of kobject is run with holding the
+ * global lock
+ */
 static void cleanup_glue_dir(struct device *dev, struct kobject *glue_dir)
 {
 	/* see if we live in a "glue" directory */
-	if (!glue_dir || !dev->class ||
-	    glue_dir->kset != &dev->class->p->glue_dirs)
+	if (!live_in_glue_dir(glue_dir, dev))
 		return;
 
+	mutex_lock(&gdp_mutex);
 	kobject_put(glue_dir);
-}
-
-static void cleanup_device_parent(struct device *dev)
-{
-	cleanup_glue_dir(dev, dev->kobj.parent);
+	mutex_unlock(&gdp_mutex);
 }
 
 static int device_add_class_symlinks(struct device *dev)
@@ -1005,6 +1009,7 @@ int device_add(struct device *dev)
 	struct kobject *kobj;
 	struct class_interface *class_intf;
 	int error = -EINVAL;
+	struct kobject *glue_dir = NULL;
 
 	dev = get_device(dev);
 	if (!dev)
@@ -1049,8 +1054,10 @@ int device_add(struct device *dev)
 	/* first, register with generic layer. */
 	/* we require the name to be set before, and pass NULL */
 	error = kobject_add(&dev->kobj, dev->kobj.parent, NULL);
-	if (error)
+	if (error) {
+		glue_dir = get_glue_dir(dev);
 		goto Error;
+	}
 
 	/* notify platform of device entry */
 	if (platform_notify)
@@ -1133,11 +1140,11 @@ done:
 	device_remove_file(dev, &uevent_attr);
  attrError:
 	kobject_uevent(&dev->kobj, KOBJ_REMOVE);
+	glue_dir = get_glue_dir(dev);
 	kobject_del(&dev->kobj);
  Error:
-	cleanup_device_parent(dev);
-	if (parent)
-		put_device(parent);
+	cleanup_glue_dir(dev, glue_dir);
+	put_device(parent);
 name_error:
 	kfree(dev->p);
 	dev->p = NULL;
@@ -1208,6 +1215,7 @@ void put_device(struct device *dev)
 void device_del(struct device *dev)
 {
 	struct device *parent = dev->parent;
+	struct kobject *glue_dir = NULL;
 	struct class_interface *class_intf;
 
 	/* Notify clients of device removal.  This call must come
@@ -1249,8 +1257,9 @@ void device_del(struct device *dev)
 	if (platform_notify_remove)
 		platform_notify_remove(dev);
 	kobject_uevent(&dev->kobj, KOBJ_REMOVE);
-	cleanup_device_parent(dev);
+	glue_dir = get_glue_dir(dev);
 	kobject_del(&dev->kobj);
+	cleanup_glue_dir(dev, glue_dir);
 	put_device(parent);
 }
 

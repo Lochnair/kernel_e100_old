@@ -311,6 +311,9 @@ EXPORT_SYMBOL_GPL(get_cpu_device);
 static DEVICE_ATTR(modalias, 0444, arch_print_cpu_modalias, NULL);
 #endif
 
+extern struct device_attribute dev_attr_octeon_plug;
+extern struct device_attribute dev_attr_octeon_unplug;
+
 static struct attribute *cpu_root_attrs[] = {
 #ifdef CONFIG_ARCH_CPU_PROBE_RELEASE
 	&dev_attr_probe.attr,
@@ -323,6 +326,10 @@ static struct attribute *cpu_root_attrs[] = {
 	&dev_attr_offline.attr,
 #ifdef CONFIG_ARCH_HAS_CPU_AUTOPROBE
 	&dev_attr_modalias.attr,
+#endif
+#if defined(CONFIG_CAVIUM_OCTEON_SOC) && defined(CONFIG_HOTPLUG_CPU)
+	&dev_attr_octeon_plug.attr,
+	&dev_attr_octeon_unplug.attr,
 #endif
 	NULL
 };

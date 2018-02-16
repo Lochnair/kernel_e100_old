@@ -54,7 +54,7 @@
 
 
 struct dw8250_data {
-	int		last_lcr;
+	int		last_mcr;
 	int		line;
 	struct clk	*clk;
 	u8		usr_reg;
@@ -68,53 +68,117 @@ static unsigned int dw8250_serial_inq(struct uart_port *p, int offset)
 	return (u8)__raw_readq(p->membase + offset);
 }
 
+static inline int dw8250_modify_msr(struct uart_port *p, int offset, int value)
+{
+	struct dw8250_data *d = p->private_data;
+
+	/* If reading MSR, report CTS asserted when auto-CTS/RTS enabled */
+	if (offset == UART_MSR && d->last_mcr & UART_MCR_AFE) {
+		value |= UART_MSR_CTS;
+		value &= ~UART_MSR_DCTS;
+	}
+
+	return value;
+}
+
+static void dw8250_force_idle(struct uart_port *p)
+{
+	serial8250_clear_and_reinit_fifos(container_of
+					  (p, struct uart_8250_port, port));
+	(void)p->serial_in(p, UART_RX);
+}
+
 static void dw8250_serial_outq(struct uart_port *p, int offset, int value)
 {
 	struct dw8250_data *d = p->private_data;
 
-	if (offset == UART_LCR)
-		d->last_lcr = value;
+	if (offset == UART_MCR)
+		d->last_mcr = value;
 
 	offset <<= p->regshift;
 	value &= 0xff;
 	__raw_writeq(value, p->membase + offset);
 	dw8250_serial_inq(p, UART_LCR);
+
+	/* Make sure LCR write wasn't ignored */
+	if (offset == UART_LCR) {
+		int tries = 1000;
+		while (tries--) {
+			unsigned int lcr = p->serial_in(p, UART_LCR);
+			if ((value & ~UART_LCR_SPAR) == (lcr & ~UART_LCR_SPAR))
+                                return;
+			dw8250_force_idle(p);
+			__raw_writeq(value,
+				     p->membase + (UART_LCR << p->regshift));
+		}
+		dev_err(p->dev, "Couldn't set LCR to %d\n", value);
+	}
 }
 
 static void dw8250_serial_out(struct uart_port *p, int offset, int value)
 {
 	struct dw8250_data *d = p->private_data;
 
-	if (offset == UART_LCR)
-		d->last_lcr = value;
+	if (offset == UART_MCR)
+		d->last_mcr = value;
 
-	offset <<= p->regshift;
-	writeb(value, p->membase + offset);
+	writeb(value, p->membase + (offset << p->regshift));
+
+	/* Make sure LCR write wasn't ignored */
+	if (offset == UART_LCR) {
+		int tries = 1000;
+		while (tries--) {
+			unsigned int lcr = p->serial_in(p, UART_LCR);
+			if ((value & ~UART_LCR_SPAR) == (lcr & ~UART_LCR_SPAR))
+				return;
+			dw8250_force_idle(p);
+			writeb(value, p->membase + (UART_LCR << p->regshift));
+		}
+		/*
+		 * FIXME: this deadlocks if port->lock is already held
+		 * dev_err(p->dev, "Couldn't set LCR to %d\n", value);
+		 */
+	}
 }
 
 static unsigned int dw8250_serial_in(struct uart_port *p, int offset)
 {
-	offset <<= p->regshift;
+	unsigned int value = readb(p->membase + (offset << p->regshift));
 
-	return readb(p->membase + offset);
+	return dw8250_modify_msr(p, offset, value);
 }
 
 static void dw8250_serial_out32(struct uart_port *p, int offset, int value)
 {
 	struct dw8250_data *d = p->private_data;
 
-	if (offset == UART_LCR)
-		d->last_lcr = value;
+	if (offset == UART_MCR)
+		d->last_mcr = value;
 
-	offset <<= p->regshift;
-	writel(value, p->membase + offset);
+	writel(value, p->membase + (offset << p->regshift));
+
+	/* Make sure LCR write wasn't ignored */
+	if (offset == UART_LCR) {
+		int tries = 1000;
+		while (tries--) {
+			unsigned int lcr = p->serial_in(p, UART_LCR);
+			if ((value & ~UART_LCR_SPAR) == (lcr & ~UART_LCR_SPAR))
+				return;
+			dw8250_force_idle(p);
+			writel(value, p->membase + (UART_LCR << p->regshift));
+		}
+		/*
+		 * FIXME: this deadlocks if port->lock is already held
+		 * dev_err(p->dev, "Couldn't set LCR to %d\n", value);
+		 */
+	}
 }
 
 static unsigned int dw8250_serial_in32(struct uart_port *p, int offset)
 {
-	offset <<= p->regshift;
+	unsigned int value = readl(p->membase + (offset << p->regshift));
 
-	return readl(p->membase + offset);
+	return dw8250_modify_msr(p, offset, value);
 }
 
 static int dw8250_handle_irq(struct uart_port *p)
@@ -125,9 +189,8 @@ static int dw8250_handle_irq(struct uart_port *p)
 	if (serial8250_handle_irq(p, iir)) {
 		return 1;
 	} else if ((iir & UART_IIR_BUSY) == UART_IIR_BUSY) {
-		/* Clear the USR and write the LCR again. */
+		/* Clear the USR. */
 		(void)p->serial_in(p, d->usr_reg);
-		p->serial_out(p, UART_LCR, d->last_lcr);
 
 		return 1;
 	}
@@ -272,6 +335,7 @@ static int dw8250_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&uart.port.lock);
+	spin_lock_init(&uart.lsr_lock);
 	uart.port.mapbase = regs->start;
 	uart.port.irq = irq->start;
 	uart.port.handle_irq = dw8250_handle_irq;
@@ -402,6 +466,8 @@ MODULE_DEVICE_TABLE(of, dw8250_of_match);
 static const struct acpi_device_id dw8250_acpi_match[] = {
 	{ "INT33C4", 0 },
 	{ "INT33C5", 0 },
+	{ "INT3434", 0 },
+	{ "INT3435", 0 },
 	{ "80860F0A", 0 },
 	{ },
 };

@@ -84,4 +84,6 @@
  */
 #define MAX_DMA32_PFN (((1ULL << 32) - (1ULL << 28)) >> PAGE_SHIFT)
 
+#define cpu_has_local_ebase	0
+
 #endif

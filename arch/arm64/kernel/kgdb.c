@@ -1,21 +1,30 @@
 /*
- * arch/arm64/kernel/kgdb.c
+ * AArch64 KGDB support
  *
- * Aarch64 KGDB support. 
+ * Based on arch/arm/kernel/kgdb.c
  *
- * most part of code copied from arch/arm/kernel/kgdb.c
+ * Copyright (C) 2013 Cavium Inc.
+ * Author: Vijaya Kumar K <vijaya.kumar@caviumnetworks.com>
  *
- * Author:  Vijaya Kumar K <vijaya.kumar@caviumnetworks.com>
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/irq.h>
 #include <linux/kdebug.h>
 #include <linux/kgdb.h>
 #include <asm/traps.h>
-#include <asm/debug-monitors.h>
 
-struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
-{
+struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] = {
 	{ "x0", 8, offsetof(struct pt_regs, regs[0])},
 	{ "x1", 8, offsetof(struct pt_regs, regs[1])},
 	{ "x2", 8, offsetof(struct pt_regs, regs[2])},
@@ -49,7 +58,7 @@ struct dbg_reg_def_t dbg_reg_def[DBG_MAX_REG_NUM] =
 	{ "x30", 8, offsetof(struct pt_regs, regs[30])},
 	{ "sp", 8, offsetof(struct pt_regs, sp)},
 	{ "pc", 8, offsetof(struct pt_regs, pc)},
-	{ "cpsr", 4, offsetof(struct pt_regs, pstate)},
+	{ "pstate", 8, offsetof(struct pt_regs, pstate)},
 	{ "v0", 16, -1 },
 	{ "v1", 16, -1 },
 	{ "v2", 16, -1 },
@@ -114,25 +123,11 @@ void
 sleeping_thread_to_gdb_regs(unsigned long *gdb_regs, struct task_struct *task)
 {
 	struct pt_regs *thread_regs;
-	int regno;
-	int i;
-
-	/* Just making sure... */
-	if (task == NULL)
-		return;
 
 	/* Initialize to zero */
-	for (regno = 0; regno < GDB_MAX_REGS; regno++)
-		gdb_regs[regno] = 0;
-
-	thread_regs		= task_pt_regs(task);
-
-	for(i = 0; i < 31; i++)
-		gdb_regs[i] = thread_regs->regs[i];
-
-        gdb_regs[31]            = thread_regs->sp;
-        gdb_regs[32]            = thread_regs->pc;
-        gdb_regs[33]            = thread_regs->pstate;
+	memset((char *)gdb_regs, 0, NUMREGBYTES);
+	thread_regs = task_pt_regs(task);
+	memcpy((void *)gdb_regs, (void *)thread_regs->regs, GP_REG_BYTES);
 }
 
 void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long pc)
@@ -142,56 +137,74 @@ void kgdb_arch_set_pc(struct pt_regs *regs, unsigned long pc)
 
 static int compiled_break;
 
+static void kgdb_arch_update_addr(struct pt_regs *regs,
+				char *remcom_in_buffer)
+{
+	unsigned long addr;
+	char *ptr;
+
+	ptr = &remcom_in_buffer[1];
+	if (kgdb_hex2long(&ptr, &addr))
+		kgdb_arch_set_pc(regs, addr);
+	else if (compiled_break == 1)
+		kgdb_arch_set_pc(regs, regs->pc + 4);
+
+	compiled_break = 0;
+}
+
 int kgdb_arch_handle_exception(int exception_vector, int signo,
 			       int err_code, char *remcom_in_buffer,
 			       char *remcom_out_buffer,
 			       struct pt_regs *linux_regs)
 {
-	unsigned long addr;
-	char *ptr;
 	int err;
 
 	switch (remcom_in_buffer[0]) {
 	case 'D':
 	case 'k':
+		/*
+		 * Packet D (Detach), k (kill). No special handling
+		 * is required here. Handle same as c packet.
+		 */
 	case 'c':
 		/*
-		 * Try to read optional parameter, pc unchanged if no parm.
+		 * Packet c (Continue) to continue executing.
+		 * Set pc to required address.
+		 * Try to read optional parameter and set pc.
 		 * If this was a compiled breakpoint, we need to move
-		 * to the next instruction or we will just breakpoint
+		 * to the next instruction else we will just breakpoint
 		 * over and over again.
 		 */
-		ptr = &remcom_in_buffer[1];
-		if (kgdb_hex2long(&ptr, &addr))
-			linux_regs->pc = addr;
-		else if (compiled_break == 1)
-			linux_regs->pc += 4;
+		kgdb_arch_update_addr(linux_regs, remcom_in_buffer);
+		atomic_set(&kgdb_cpu_doing_single_step, -1);
+		kgdb_single_step =  0;
 
-		compiled_break = 0;
-
-		/* Disable single step if enabled */
+		/*
+		 * Received continue command, disable single step
+		 */
 		if (kernel_active_single_step())
 			kernel_disable_single_step();
+
 		err = 0;
 		break;
 	case 's':
+		if (kernel_active_single_step())
+			kernel_disable_single_step();
 		/*
-		 * Workaround disable step debug for every step command
+		 * Update step address value with address passed
+		 * with step packet.
+		 * On debug exception return PC is copied to ELR
+		 * So just update PC.
+		 * If no step address is passed, resume from the address
+		 * pointed by PC. Do not update PC
 		 */
-                if (kernel_active_single_step())
-                        kernel_disable_single_step();
+		kgdb_arch_update_addr(linux_regs, remcom_in_buffer);
+		atomic_set(&kgdb_cpu_doing_single_step, raw_smp_processor_id());
+		kgdb_single_step =  1;
 
-		/* 
-		 * Update PC value with step address passed
+		/*
+		 * Enable single step handling
 		 */
-		ptr = &remcom_in_buffer[1];
-		if (kgdb_hex2long(&ptr, &addr))
-			kgdb_arch_set_pc(linux_regs, addr);
-
-		if (compiled_break == 1)
-			compiled_break = 0;
-
-		/* Enable step handling if not enable */
 		if (!kernel_active_single_step())
 			kernel_enable_single_step(linux_regs);
 		err = 0;
@@ -202,15 +215,13 @@ int kgdb_arch_handle_exception(int exception_vector, int signo,
 	return err;
 }
 
-static int
-kgdb_brk_fn(struct pt_regs *regs, unsigned int esr, unsigned long addr)
+static int kgdb_brk_fn(struct pt_regs *regs, unsigned int esr)
 {
 	kgdb_handle_exception(1, SIGTRAP, 0, regs);
 	return 0;
 }
 
-static int kgdb_compiled_brk_fn(struct pt_regs *regs, unsigned int esr,
-				unsigned long addr)
+static int kgdb_compiled_brk_fn(struct pt_regs *regs, unsigned int esr)
 {
 	compiled_break = 1;
 	kgdb_handle_exception(1, SIGTRAP, 0, regs);
@@ -218,39 +229,38 @@ static int kgdb_compiled_brk_fn(struct pt_regs *regs, unsigned int esr,
 	return 0;
 }
 
-static int kgdb_step_brk_fn(struct pt_regs *regs, unsigned int esr,
-                               unsigned long addr)
+static int kgdb_step_brk_fn(struct pt_regs *regs, unsigned int esr)
 {
 	kgdb_handle_exception(1, SIGTRAP, 0, regs);
 	return 0;
 }
 
 static struct break_hook kgdb_brkpt_hook = {
-	.esr_mask		= 0xffffffff,
-	.esr_magic		= KGDB_BREAKINST_ESR_VAL,
-	.fn			= kgdb_brk_fn
+	.esr_mask	= 0xffffffff,
+	.esr_val	= DBG_ESR_VAL_BRK(KGDB_DYN_DGB_BRK_IMM),
+	.fn		= kgdb_brk_fn
 };
 
 static struct break_hook kgdb_compiled_brkpt_hook = {
-	.esr_mask		= 0xffffffff,
-	.esr_magic		= KGDB_COMPILED_BREAK_ESR_VAL,
-	.fn			= kgdb_compiled_brk_fn
+	.esr_mask	= 0xffffffff,
+	.esr_val	= DBG_ESR_VAL_BRK(KDBG_COMPILED_DBG_BRK_IMM),
+	.fn		= kgdb_compiled_brk_fn
 };
 
 static struct step_hook kgdb_step_hook = {
-	.fn                     = kgdb_step_brk_fn
+	.fn		= kgdb_step_brk_fn
 };
 
 static void kgdb_call_nmi_hook(void *ignored)
 {
-       kgdb_nmicallback(raw_smp_processor_id(), get_irq_regs());
+	kgdb_nmicallback(raw_smp_processor_id(), get_irq_regs());
 }
 
 void kgdb_roundup_cpus(unsigned long flags)
 {
-       local_irq_enable();
-       smp_call_function(kgdb_call_nmi_hook, NULL, 0);
-       local_irq_disable();
+	local_irq_enable();
+	smp_call_function(kgdb_call_nmi_hook, NULL, 0);
+	local_irq_disable();
 }
 
 static int __kgdb_notify(struct die_args *args, unsigned long cmd)
@@ -277,15 +287,16 @@ kgdb_notify(struct notifier_block *self, unsigned long cmd, void *ptr)
 
 static struct notifier_block kgdb_notifier = {
 	.notifier_call	= kgdb_notify,
+	/*
+	 * Want to be lowest priority
+	 */
 	.priority	= -INT_MAX,
 };
 
-
-/**
- *	kgdb_arch_init - Perform any architecture specific initalization.
- *
- *	This function will handle the initalization of any architecture
- *	specific callbacks.
+/*
+ * kgdb_arch_init - Perform any architecture specific initalization.
+ * This function will handle the initalization of any architecture
+ * specific callbacks.
  */
 int kgdb_arch_init(void)
 {
@@ -297,15 +308,13 @@ int kgdb_arch_init(void)
 	register_break_hook(&kgdb_brkpt_hook);
 	register_break_hook(&kgdb_compiled_brkpt_hook);
 	register_step_hook(&kgdb_step_hook);
-
 	return 0;
 }
 
-/**
- *	kgdb_arch_exit - Perform any architecture specific uninitalization.
- *
- *	This function will handle the uninitalization of any architecture
- *	specific callbacks, for dynamic registration and unregistration.
+/*
+ * kgdb_arch_exit - Perform any architecture specific uninitalization.
+ * This function will handle the uninitalization of any architecture
+ * specific callbacks, for dynamic registration and unregistration.
  */
 void kgdb_arch_exit(void)
 {
@@ -316,11 +325,14 @@ void kgdb_arch_exit(void)
 }
 
 /*
- * Register our undef instruction hooks with ARM undef core.
- * We regsiter a hook specifically looking for the KGB break inst
- * and we handle the normal undef case within the do_undefinstr
- * handler.
+ * ARM instructions are always in LE.
+ * Break instruction is encoded in LE format
  */
 struct kgdb_arch arch_kgdb_ops = {
-	.gdb_bpt_instr		= {0x00, 0x00, 0x20, 0xd4}
+	.gdb_bpt_instr = {
+		KGDB_DYN_BRK_INS_BYTE0,
+		KGDB_DYN_BRK_INS_BYTE1,
+		KGDB_DYN_BRK_INS_BYTE2,
+		KGDB_DYN_BRK_INS_BYTE3,
+	}
 };

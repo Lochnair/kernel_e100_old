@@ -26,16 +26,6 @@ char __initdata cmd_line[COMMAND_LINE_SIZE];
 
 int __initdata of_ioapic;
 
-unsigned long pci_address_to_pio(phys_addr_t address)
-{
-	/*
-	 * The ioport address can be directly used by inX / outX
-	 */
-	BUG_ON(address >= (1 << 16));
-	return (unsigned long)address;
-}
-EXPORT_SYMBOL_GPL(pci_address_to_pio);
-
 void __init early_init_dt_scan_chosen_arch(unsigned long node)
 {
 	BUG();
@@ -106,7 +96,6 @@ struct device_node *pcibios_get_phb_of_node(struct pci_bus *bus)
 
 static int x86_of_pci_irq_enable(struct pci_dev *dev)
 {
-	struct of_irq oirq;
 	u32 virq;
 	int ret;
 	u8 pin;
@@ -117,12 +106,7 @@ static int x86_of_pci_irq_enable(struct pci_dev *dev)
 	if (!pin)
 		return 0;
 
-	ret = of_irq_map_pci(dev, &oirq);
-	if (ret)
-		return ret;
-
-	virq = irq_create_of_mapping(oirq.controller, oirq.specifier,
-			oirq.size);
+	virq = of_irq_parse_and_map_pci(dev, 0, 0);
 	if (virq == 0)
 		return -EINVAL;
 	dev->irq = virq;

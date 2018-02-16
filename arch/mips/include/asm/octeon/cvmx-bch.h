@@ -72,7 +72,9 @@ extern "C" {
 #define CVMX_BCH_DRBELL CVMX_BCH_DRBELL_FUNC()
 static inline uint64_t CVMX_BCH_DRBELL_FUNC(void)
 {
-	if (!(OCTEON_IS_MODEL(OCTEON_CN70XX)))
+	if (!OCTEON_IS_MODEL(OCTEON_CN70XX) &&
+	    !OCTEON_IS_MODEL(OCTEON_CN73XX) &&
+	    !OCTEON_IS_MODEL(OCTEON_CNF75XX))
 		cvmx_warn("CVMX_BCH_DRBELL not supported on this chip\n");
 	return CVMX_ADD_IO_SEG(0x0001710000000000ull);
 }

@@ -64,8 +64,12 @@ static int ftrace_modify_code(unsigned long pc, unsigned int old,
 			return -EINVAL;
 	}
 
-	if (probe_kernel_write((void *)pc, &new, MCOUNT_INSN_SIZE))
+	pax_open_kernel();
+	if (probe_kernel_write((void *)pc, &new, MCOUNT_INSN_SIZE)) {
+		pax_close_kernel();
 		return -EPERM;
+	}
+	pax_close_kernel();
 
 	flush_icache_range(pc, pc + MCOUNT_INSN_SIZE);
 

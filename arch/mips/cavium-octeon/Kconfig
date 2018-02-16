@@ -18,19 +18,34 @@ config CAVIUM_CN63XXP1
 	  workarounds will cause a slight decrease in performance on
 	  non-CN6XXX hardware.
 
-config CAVIUM_OCTEON_CVMSEG_SIZE
-	int "Number of L1 cache lines reserved for CVMSEG memory"
-	range 2 54
-	default 2
+config CAVIUM_ERET_MISPREDICT_WORKAROUND
+	bool "Enable workaround for ERET misprediction under virtualization"
+	default "n"
+	depends on KVM_MIPS_VZ
 	help
-	  CVMSEG LM is a segment that accesses portions of the dcache as a
-	  local memory; the larger CVMSEG is, the smaller the cache is.
-	  This selects the size of CVMSEG LM, which is in cache blocks. The
-	  legally range is from 2 to 54 cache blocks (i.e. CVMSEG LM is
-	  between zero and 6192 bytes).
+	  Hardware doesn't detect ERET misprediction under certain
+	  circumstances. This causes corruption of Guest.EPC. One
+	  symptom are TLB multi-match machine checks in guest mode.
+	  (which happen when code of guest tlb_refill_handler is
+	  executed twice due to this issue). The workaround is to
+	  always force detection of a misprediction.
 
-	  The kernel uses two blocks (one for TLB exception handlers
-	  and the other for driver IOBDMA operations).
+config CAVIUM_OCTEON_EXTRA_CVMSEG
+	int "Number of extra L1 cache lines reserved for CVMSEG memory"
+	range 0 50
+	default 0
+	help
+	  CVMSEG LM is a segment that accesses portions of the dcache
+	  as a local memory; the larger CVMSEG is, the smaller the
+	  cache is.  The kernel uses two or three blocks (one for TLB
+	  exception handlers, one for driver IOBDMA operations, and on
+	  models that need it, one for LMTDMA operations). This
+	  selects an optional extra number of CVMSEG lines for use by
+	  other software.
+
+	  Normally no extra lines are required, and this parameter
+	  should be set to zero.
+
 
 config FAST_ACCESS_TO_THREAD_POINTER
 	bool "Enable fast access to the thread pointer"
@@ -174,6 +189,7 @@ config CAVIUM_OCTEON_RAPIDIO
 	bool "Enable support for Octeon Serial Rapid IO"
 	select RAPIDIO
 	select OCTEON_ETHERNET_MEM
+	select OCTEON_FPA3
 	help
 	  Connect the SRIO interfaces available in the Octeon II series of
 	  processors to the kernel's RapidIO subsystem. The existence of the
@@ -198,6 +214,23 @@ config CAVIUM_OCTEON_KERNEL_CRYPTO
 	  great care, and if done improperly, can corrupt userspace
 	  crypto state.  If OCTEON crypto instruction support is
 	  needed, select this option.
+
+config CAVIUM_OCTEON_PERF
+	bool "OCTEON-specific hardware performance counters"
+	default y
+	depends on PERF_EVENTS
+	help
+	  support extra performance counters, including L2 cache & DRAM controller
+
+config OCTEON_FPA3
+	tristate "Octeon III fpa driver"
+	default "n"
+	depends on CPU_CAVIUM_OCTEON
+	help
+	  This option enables a Octeon III driver for the Free Pool Unit (FPA).
+	  The FPA is a hardware unit that manages pools of pointers to free
+	  L2/DRAM memory. This driver provides an interface to reserve,
+	  initialize, and fill fpa pools.
 
 config ARCH_SPARSEMEM_ENABLE
 	def_bool y
@@ -235,6 +268,12 @@ config OCTEON_ERROR_INJECTOR
 	help
 	  Used to test hardware error reporting.  Should never be used
 	  in a normal running system.
+
+config CAVIUM_OCTEON_IPFWD_OFFLOAD
+	bool "Enable Cavium Octeon ip-offload module"
+	default "n"
+	help
+	  This enables Cavium Octeon ip-offload module.
 
 config CAVIUM_OCTEON_IPFWD_OFFLOAD
 	bool "Enable Cavium Octeon ip-offload module"

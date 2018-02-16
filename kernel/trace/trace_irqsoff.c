@@ -119,8 +119,12 @@ static int func_prolog_dec(struct trace_array *tr,
 		return 0;
 
 	local_save_flags(*flags);
-	/* slight chance to get a false positive on tracing_cpu */
-	if (!irqs_disabled_flags(*flags))
+	/*
+	 * Slight chance to get a false positive on tracing_cpu,
+	 * although I'm starting to think there isn't a chance.
+	 * Leave this for now just to be paranoid.
+	 */
+	if (!irqs_disabled_flags(*flags) && !preempt_count())
 		return 0;
 
 	*data = per_cpu_ptr(tr->trace_buffer.data, cpu);
@@ -366,6 +370,8 @@ out:
 	__trace_function(tr, CALLER_ADDR0, parent_ip, flags, pc);
 }
 
+static DEFINE_PER_CPU(bool, timings_stopped);
+
 static inline void
 start_critical_timing(unsigned long ip, unsigned long parent_ip)
 {
@@ -374,10 +380,11 @@ start_critical_timing(unsigned long ip, unsigned long parent_ip)
 	struct trace_array_cpu *data;
 	unsigned long flags;
 
-	if (!tracer_enabled || !tracing_is_enabled())
-		return;
-
 	cpu = raw_smp_processor_id();
+
+	if (!tracer_enabled || !tracing_is_enabled() ||
+			per_cpu(timings_stopped, cpu))
+		return;
 
 	if (per_cpu(tracing_cpu, cpu))
 		return;
@@ -417,7 +424,8 @@ stop_critical_timing(unsigned long ip, unsigned long parent_ip)
 	else
 		return;
 
-	if (!tracer_enabled || !tracing_is_enabled())
+	if (!tracer_enabled || !tracing_is_enabled() ||
+			per_cpu(timings_stopped, cpu))
 		return;
 
 	data = per_cpu_ptr(tr->trace_buffer.data, cpu);
@@ -438,8 +446,10 @@ stop_critical_timing(unsigned long ip, unsigned long parent_ip)
 /* start and stop critical timings used to for stoppage (in idle) */
 void start_critical_timings(void)
 {
-	if (preempt_trace() || irq_trace())
+	if (preempt_trace() || irq_trace()) {
+		per_cpu(timings_stopped, raw_smp_processor_id()) = false;
 		start_critical_timing(CALLER_ADDR0, CALLER_ADDR1);
+	}
 	trace_preemptirqsoff_hist(TRACE_START, 1);
 }
 EXPORT_SYMBOL_GPL(start_critical_timings);

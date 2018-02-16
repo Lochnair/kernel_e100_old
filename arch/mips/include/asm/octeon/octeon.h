@@ -12,27 +12,9 @@
 #include <linux/irqflags.h>
 #include <linux/notifier.h>
 #include <asm/octeon/cvmx.h>
-
-extern uint64_t octeon_bootmem_alloc_range_phys(uint64_t size,
-						uint64_t alignment,
-						uint64_t min_addr,
-						uint64_t max_addr,
-						int do_locking);
-extern void *octeon_bootmem_alloc(uint64_t size, uint64_t alignment,
-				  int do_locking);
-extern void *octeon_bootmem_alloc_range(uint64_t size, uint64_t alignment,
-					uint64_t min_addr, uint64_t max_addr,
-					int do_locking);
-extern void *octeon_bootmem_alloc_named(uint64_t size, uint64_t alignment,
-					char *name);
-extern void *octeon_bootmem_alloc_named_range(uint64_t size, uint64_t min_addr,
-					      uint64_t max_addr, uint64_t align,
-					      char *name);
-extern void *octeon_bootmem_alloc_named_address(uint64_t size, uint64_t address,
-						char *name);
-extern int octeon_bootmem_free_named(char *name);
-extern void octeon_bootmem_lock(void);
-extern void octeon_bootmem_unlock(void);
+#include <asm/octeon/cvmx-fpa3.h>
+#include <linux/irq.h>
+#include <linux/slab.h>
 
 extern int octeon_is_simulation(void);
 extern int octeon_is_pci_host(void);
@@ -41,11 +23,6 @@ extern uint64_t octeon_get_clock_rate(void);
 extern u64 octeon_get_io_clock_rate(void);
 extern const char *octeon_board_type_string(void);
 extern const char *octeon_get_pci_interrupts(void);
-extern int octeon_get_southbridge_interrupt(void);
-extern int octeon_get_boot_coremask(void);
-extern int octeon_get_boot_num_arguments(void);
-extern const char *octeon_get_boot_argument(int arg);
-extern void octeon_hal_setup_reserved32(void);
 extern void octeon_user_io_init(void);
 extern asmlinkage void octeon_cop2_restore(struct octeon_cop2_state *task);
 
@@ -180,7 +157,12 @@ union octeon_cvmemctl {
 		/* RO 1 = BIST fail, 0 = BIST pass */
 		uint64_t wbfbist:1;
 		/* Reserved */
-		uint64_t reserved:13;
+		uint64_t reserved:6;
+		/* When set, LMTDMA/LMTST operations are permitted */
+		uint64_t lmtena:1;
+		/* Selects the CVMSEG LM cacheline used by LMTDMA
+		   LMTST and wide atomic store operations */
+		uint64_t lmtline:6;
 		/* When set, TLB parity errors can occur. */
 		uint64_t tlbperrena:1;
 		/* OCTEON II - When set, CVMSET LM parity errors are enabled. */
@@ -318,7 +300,9 @@ union octeon_cvmemctl {
 		uint64_t disstpref:1;
 		uint64_t lmemperrena:1;
 		uint64_t tlbperrena:1;
-		uint64_t reserved:13;
+		uint64_t lmtline:6;
+		uint64_t lmtena:1;
+		uint64_t reserved:6;
 		uint64_t wbfbist:1;
 		uint64_t ptgbist:1;
 		uint64_t dcmbist:1;
@@ -327,6 +311,40 @@ union octeon_cvmemctl {
 		uint64_t tlbbist:1;
 #endif
 	} s;
+};
+
+struct octeon_ciu_chip_data {
+	union {
+		struct {		/* only used for ciu3 */
+			u64 ciu3_addr;
+			union {
+				unsigned int intsn;
+				unsigned int idt; /* For errbit irq */
+			};
+		};
+		struct {		/* only used for ciu/ciu2 */
+			u8 line;
+			u8 bit;
+		};
+	};
+	int gpio_line;
+	int current_cpu;	/* Next CPU expected to take this irq */
+	int ciu_node; /* NUMA node number of the CIU */
+	int trigger_type;
+};
+
+struct octeon_edac_lmc_data {
+	uint8_t node;		/** CPU node number */
+	uint8_t lmc;		/** LMC interface number on node */
+};
+
+struct edac_device_ctl_info;
+
+struct octeon_edac_l2c_data {
+	struct edac_device_ctl_info *ed;
+	struct platform_device *pdev;
+	uint8_t node;		/** CPU node number */
+	uint8_t tad;		/** L2C TAD number */
 };
 
 extern void octeon_write_lcd(const char *s);
@@ -364,7 +382,7 @@ static inline uint32_t octeon_npi_read32(uint64_t address)
 
 extern struct cvmx_bootinfo *octeon_bootinfo;
 
-extern uint64_t octeon_bootloader_entry_addr;
+extern u32 octeon_cvmseg_lines;
 
 static inline uint64_t octeon_read_ptp_csr(u64 csr)
 {
@@ -387,9 +405,6 @@ static inline uint64_t octeon_read_ptp_csr(u64 csr)
 
 extern void (*octeon_irq_setup_secondary)(void);
 
-typedef void (*octeon_irq_ip4_handler_t)(void);
-void octeon_irq_set_ip4_handler(octeon_irq_ip4_handler_t);
-
 int octeon_coreid_for_cpu(int cpu);
 int octeon_cpu_for_coreid(int coreid);
 
@@ -400,12 +415,33 @@ int octeon_request_ipi_handler(octeon_message_fn_t fn);
 void octeon_send_ipi_single(int cpu, unsigned int action);
 void octeon_release_ipi_handler(int action);
 void octeon_ciu3_mbox_send(int cpu, unsigned int mbox);
+void octeon_irq_ciu3_enable(struct irq_data *data);
+void octeon_irq_ciu3_disable(struct irq_data *data);
+void octeon_irq_ciu3_mask(struct irq_data *data);
+void octeon_irq_ciu3_ack(struct irq_data *data);
+void octeon_irq_ciu3_mask_ack(struct irq_data *data);
+int octeon_irq_ciu_set_type(struct irq_data *data, unsigned int flow_type);
+int octeon_irq_ciu3_set_affinity(struct irq_data *data,
+				 const struct cpumask *dest, bool force);
+void octeon_irq_free_cd(struct irq_domain *d, unsigned int irq);
+int octeon_irq_ciu3_xlat(struct irq_domain *d, struct device_node *node,
+			 const u32 *intspec, unsigned int intsize,
+			 unsigned long *out_hwirq, unsigned int *out_type);
+int octeon_irq_ciu3_mapx(struct irq_domain *d, unsigned int virq,
+			 irq_hw_number_t hw, struct irq_chip *chip);
+void *octeon_irq_get_ciu3_info(int node);
+void octeon_irq_add_block_domain(int node, uint8_t block,
+				 struct irq_domain *domain);
+struct irq_domain *octeon_irq_get_block_domain(int node, uint8_t block);
 
 #define OCTEON_DEBUG_UART 1
 
 #if IS_ENABLED(CONFIG_CAVIUM_OCTEON_ERROR_TREE)
 int octeon_error_tree_enable(enum cvmx_error_groups group, int unit);
 int octeon_error_tree_disable(enum cvmx_error_groups group, int unit);
+int octeon_error_tree_shutdown(void);
+int octeon_error3_tree_enable(enum cvmx_error_groups group, int unit);
+int octeon_error3_tree_disable(enum cvmx_error_groups group, int unit);
 #else
 static inline int octeon_error_tree_enable(enum cvmx_error_groups group, int unit)
 {
@@ -415,7 +451,15 @@ static inline int octeon_error_tree_disable(enum cvmx_error_groups group, int un
 {
 	return 0;
 }
+static inline int octeon_error_tree_shutdown(void)
+{
+	return 0;
+}
 #endif
+
+int octeon_ciu3_errbits_set_handler(void (* handler)(int node, int intsn));
+int octeon_ciu3_errbits_enable_intsn(int node, int intsn);
+int octeon_ciu3_errbits_disable_intsn(int node , int intsn);
 
 int octeon_i2c_cvmx2i2c(unsigned int cvmx_twsi_bus_num);
 
@@ -423,6 +467,13 @@ int octeon_i2c_cvmx2i2c(unsigned int cvmx_twsi_bus_num);
 void octeon_setup_smp(void);
 #else
 static inline void octeon_setup_smp(void) {}
+#endif
+#ifdef CONFIG_NUMA
+void octeon_setup_numa(void);
+void octeon_numa_cpu_online(void);
+#else
+static inline void octeon_setup_numa(void) {}
+static inline void octeon_numa_cpu_online(void) {}
 #endif
 
 extern struct semaphore octeon_bootbus_sem;
@@ -435,7 +486,7 @@ int unregister_co_cache_error_notifier(struct notifier_block *nb);
 #define CO_CACHE_ERROR_WB_PARITY 2
 #define CO_CACHE_ERROR_TLB_PARITY 3
 
-extern unsigned long long cache_err_dcache[NR_CPUS];
+extern unsigned long long cache_err_dcache[];
 
 /* Octeon multiplier save/restore routines from octeon_switch.S */
 void octeon_mult_save(void);
@@ -450,5 +501,36 @@ void octeon_mult_restore3(void);
 void octeon_mult_restore3_end(void);
 void octeon_mult_restore2(void);
 void octeon_mult_restore2_end(void);
+
+/*
+ * This definition must be kept in sync with the one in
+ * cvmx-global-resources.c
+ */
+struct global_resource_tag {
+	uint64_t lo;
+	uint64_t hi;
+};
+
+void res_mgr_free(struct global_resource_tag tag, int inst);
+void res_mgr_free_range(struct global_resource_tag tag, int *inst, int req_cnt);
+int res_mgr_alloc(struct global_resource_tag tag, int req_inst,
+		  bool use_last_avail);
+int res_mgr_alloc_range(struct global_resource_tag tag, int req_inst,
+			int req_cnt, bool use_last_avail, int *inst);
+int res_mgr_create_resource(struct global_resource_tag tag, int inst_cnt);
+
+#if IS_ENABLED(CONFIG_OCTEON_FPA3)
+int octeon_fpa3_init(int node);
+int octeon_fpa3_pool_init(int node, int pool_num, int *pool, void **pool_stack,
+			  int num_ptrs);
+int octeon_fpa3_aura_init(int node, int pool, int aura_num, int *aura,
+			  int num_bufs, unsigned int limit);
+int octeon_fpa3_mem_fill(int node, struct kmem_cache *cache, int aura,
+			 int num_bufs);
+void octeon_fpa3_free(u64 node, int aura, const void *buf);
+void *octeon_fpa3_alloc(u64 node, int aura);
+void octeon_fpa3_release_pool(int node, int pool);
+void octeon_fpa3_release_aura(int node, int aura);
+#endif
 
 #endif /* __ASM_OCTEON_OCTEON_H */

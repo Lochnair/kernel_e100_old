@@ -384,4 +384,10 @@ struct linux_binprm;
 extern int arch_setup_additional_pages(struct linux_binprm *bprm,
 				       int uses_interp);
 
+#ifndef CONFIG_PAX_ASLR
+struct mm_struct;
+extern unsigned long arch_randomize_brk(struct mm_struct *mm);
+#define arch_randomize_brk arch_randomize_brk
+#endif
+
 #endif /* _ASM_ELF_H */

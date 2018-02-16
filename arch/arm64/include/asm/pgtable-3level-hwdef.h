@@ -16,7 +16,6 @@
 #ifndef __ASM_PGTABLE_3LEVEL_HWDEF_H
 #define __ASM_PGTABLE_3LEVEL_HWDEF_H
 
-#ifndef CONFIG_ARM64_64K_PAGES
 /*
  * With LPAE and 4KB pages, there are 3 levels of page tables. Each level has
  * 512 entries of 8 bytes each, occupying a 4K page. The first level table
@@ -48,37 +47,4 @@
 #define SECTION_SIZE		(_AC(1, UL) << SECTION_SHIFT)
 #define SECTION_MASK		(~(SECTION_SIZE-1))
 
-#else
-
-/*
- * With 64KB pages, there are 3 levels of page tables. Each level has
- * entries of 8 bytes each, occupying a 64K page. The first level table
- * has 64 entries and rest of them have 8192 entries.
- */
-#define PTRS_PER_PTE		8192
-#define PTRS_PER_PMD		8192
-#define PTRS_PER_PGD		64
-
-/*
- * PGDIR_SHIFT determines the size a top-level page table entry can map.
- */
-#define PGDIR_SHIFT		42
-#define PGDIR_SIZE		(_AC(1, UL) << PGDIR_SHIFT)
-#define PGDIR_MASK		(~(PGDIR_SIZE-1))
-
-/*
- * PMD_SHIFT determines the size a middle-level page table entry can map.
- */
-#define PMD_SHIFT		29
-#define PMD_SIZE		(_AC(1, UL) << PMD_SHIFT)
-#define PMD_MASK		(~(PMD_SIZE-1))
-
-/*
- * section address mask and size definitions.
- */
-#define SECTION_SHIFT		29
-#define SECTION_SIZE		(_AC(1, UL) << SECTION_SHIFT)
-#define SECTION_MASK		(~(SECTION_SIZE-1))
-
-#endif /* CONFIG_ARM64_64K_PAGES */ 
 #endif

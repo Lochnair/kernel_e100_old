@@ -523,6 +523,31 @@ out_and_saveregs:
 	tm_save_sprs(thr);
 }
 
+extern void __tm_recheckpoint(struct thread_struct *thread,
+			      unsigned long orig_msr);
+
+void tm_recheckpoint(struct thread_struct *thread,
+		     unsigned long orig_msr)
+{
+	unsigned long flags;
+
+	/* We really can't be interrupted here as the TEXASR registers can't
+	 * change and later in the trecheckpoint code, we have a userspace R1.
+	 * So let's hard disable over this region.
+	 */
+	local_irq_save(flags);
+	hard_irq_disable();
+
+	/* The TM SPRs are restored here, so that TEXASR.FS can be set
+	 * before the trecheckpoint and no explosion occurs.
+	 */
+	tm_restore_sprs(thread);
+
+	__tm_recheckpoint(thread, orig_msr);
+
+	local_irq_restore(flags);
+}
+
 static inline void tm_recheckpoint_new_task(struct task_struct *new)
 {
 	unsigned long msr;
@@ -541,13 +566,10 @@ static inline void tm_recheckpoint_new_task(struct task_struct *new)
 	if (!new->thread.regs)
 		return;
 
-	/* The TM SPRs are restored here, so that TEXASR.FS can be set
-	 * before the trecheckpoint and no explosion occurs.
-	 */
-	tm_restore_sprs(&new->thread);
-
-	if (!MSR_TM_ACTIVE(new->thread.regs->msr))
+	if (!MSR_TM_ACTIVE(new->thread.regs->msr)){
+		tm_restore_sprs(&new->thread);
 		return;
+	}
 	msr = new->thread.tm_orig_msr;
 	/* Recheckpoint to restore original checkpointed register state. */
 	TM_DEBUG("*** tm_recheckpoint of pid %d "
@@ -926,6 +948,16 @@ int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 	flush_altivec_to_thread(src);
 	flush_vsx_to_thread(src);
 	flush_spe_to_thread(src);
+	/*
+	* Flush TM state out so we can copy it.  __switch_to_tm() does this
+	* flush but it removes the checkpointed state from the current CPU and
+	* transitions the CPU out of TM mode.  Hence we need to call
+	* tm_recheckpoint_new_task() (on the same task) to restore the
+	* checkpointed state back and the TM mode.
+	*/
+	__switch_to_tm(src);
+	tm_recheckpoint_new_task(src);
+
 	*dst = *src;
 	return 0;
 }
@@ -1404,3 +1436,60 @@ void notrace __ppc64_runlatch_off(void)
 	mtspr(SPRN_CTRLT, ctrl);
 }
 #endif /* CONFIG_PPC64 */
+
+#ifndef CONFIG_PAX_ASLR
+unsigned long arch_align_stack(unsigned long sp)
+{
+	if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space)
+		sp -= get_random_int() & ~PAGE_MASK;
+	return sp & ~0xf;
+}
+
+static inline unsigned long brk_rnd(void)
+{
+        unsigned long rnd = 0;
+
+	/* 8MB for 32bit, 1GB for 64bit */
+	if (is_32bit_task())
+		rnd = (long)(get_random_int() % (1<<(23-PAGE_SHIFT)));
+	else
+		rnd = (long)(get_random_int() % (1<<(30-PAGE_SHIFT)));
+
+	return rnd << PAGE_SHIFT;
+}
+
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	unsigned long base = mm->brk;
+	unsigned long ret;
+
+#ifdef CONFIG_PPC_STD_MMU_64
+	/*
+	 * If we are using 1TB segments and we are allowed to randomise
+	 * the heap, we can put it above 1TB so it is backed by a 1TB
+	 * segment. Otherwise the heap will be in the bottom 1TB
+	 * which always uses 256MB segments and this may result in a
+	 * performance penalty.
+	 */
+	if (!is_32bit_task() && (mmu_highuser_ssize == MMU_SEGSIZE_1T))
+		base = max_t(unsigned long, mm->brk, 1UL << SID_SHIFT_1T);
+#endif
+
+	ret = PAGE_ALIGN(base + brk_rnd());
+
+	if (ret < mm->brk)
+		return mm->brk;
+
+	return ret;
+}
+
+unsigned long randomize_et_dyn(unsigned long base)
+{
+	unsigned long ret = PAGE_ALIGN(base + brk_rnd());
+
+	if (ret < base)
+		return base;
+
+	return ret;
+}
+#endif

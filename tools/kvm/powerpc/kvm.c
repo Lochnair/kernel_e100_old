@@ -151,7 +151,7 @@ void kvm__irq_trigger(struct kvm *kvm, int irq)
 	kvm__irq_line(kvm, irq, 0);
 }
 
-void kvm__arch_periodic_poll(struct kvm *kvm)
+void kvm__arch_read_term(struct kvm *kvm)
 {
 	/* FIXME: Should register callbacks to platform-specific polls */
 	spapr_hvcons_poll(kvm);
@@ -202,13 +202,6 @@ int load_flat_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *
 	kern_cmdline[2047] = '\0';
 
 	return true;
-}
-
-bool load_bzimage(struct kvm *kvm, int fd_kernel, int fd_initrd,
-		  const char *kernel_cmdline)
-{
-	/* We don't support bzImages. */
-	return false;
 }
 
 struct fdt_prop {
@@ -389,7 +382,9 @@ static int setup_fdt(struct kvm *kvm)
 		_FDT(fdt_property_cell(fdt, "dcache-block-size", cpu_info->d_bsize));
 		_FDT(fdt_property_cell(fdt, "icache-block-size", cpu_info->i_bsize));
 
-		_FDT(fdt_property_cell(fdt, "timebase-frequency", cpu_info->tb_freq));
+		if (cpu_info->tb_freq)
+			_FDT(fdt_property_cell(fdt, "timebase-frequency", cpu_info->tb_freq));
+
 		/* Lies, but safeish lies! */
 		_FDT(fdt_property_cell(fdt, "clock-frequency", 0xddbab200));
 

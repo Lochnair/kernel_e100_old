@@ -25,7 +25,7 @@
 
 #define OCTEON_SPI_MAX_BYTES 9
 
-#define OCTEON_SPI_MAX_CLOCK_HZ 16000000
+#define OCTEON_SPI_MAX_CLOCK_HZ		16000000
 
 struct octeon_spi {
 	struct spi_master *my_master;
@@ -90,8 +90,8 @@ static int octeon_spi_do_transfer(struct octeon_spi *p,
 			speed_hz = max_freq;
 	}
 	else {
-	if (speed_hz > OCTEON_SPI_MAX_CLOCK_HZ)
-		speed_hz = OCTEON_SPI_MAX_CLOCK_HZ;
+		if (speed_hz > OCTEON_SPI_MAX_CLOCK_HZ)
+			speed_hz = OCTEON_SPI_MAX_CLOCK_HZ;
 	}
 
 	clkdiv = octeon_get_io_clock_rate() / (2 * speed_hz);

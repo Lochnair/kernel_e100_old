@@ -123,17 +123,18 @@
 
 /*
  * TLB refill handlers also map the vmalloc area into xuseg.  Avoid
- * the first couple of pages so NULL pointer dereferences will still
- * reliably trap.
+ * the first half of the MAP_BASE area so NULL pointer dereferences
+ * will still reliably trap, and to avoid OCTEON III errata.
  */
-#define VMALLOC_START		(MAP_BASE + (2 * PAGE_SIZE))
 #define VMALLOC_END	\
 	(MAP_BASE + \
 	 min(PTRS_PER_PGD * PTRS_PER_PMD * PTRS_PER_PTE * PAGE_SIZE, \
 	     (1UL << cpu_vmbits)) - (1UL << 32))
 
-#if defined(CONFIG_MODULES) && defined(KBUILD_64BIT_SYM32) && \
-	VMALLOC_START != CKSSEG
+#define VMALLOC_START		((MAP_BASE / 2 + VMALLOC_END / 2) & PAGE_MASK)
+
+#if defined(CONFIG_MODULES) && defined(KBUILD_64BIT_SYM32)
+
 /* Load modules into 32bit-compatible segment. */
 #ifdef CONFIG_MAPPED_KERNEL
 extern unsigned long kernel_image_end;
@@ -284,25 +285,25 @@ extern void pgd_init(unsigned long page);
 extern void pmd_init(unsigned long page, unsigned long pagetable);
 
 /*
- * Non-present pages:  high 24 bits are offset, next 8 bits type,
- * low 32 bits zero.
+ * Non-present pages:  high 40 bits are offset, next 8 bits type,
+ * low 16 bits zero.
  */
 static inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
-{ pte_t pte; pte_val(pte) = (type << 32) | (offset << 40); return pte; }
+{ pte_t pte; pte_val(pte) = (type << 16) | (offset << 24); return pte; }
 
-#define __swp_type(x)		(((x).val >> 32) & 0xff)
-#define __swp_offset(x)		((x).val >> 40)
+#define __swp_type(x)		(((x).val >> 16) & 0xff)
+#define __swp_offset(x)		((x).val >> 24)
 #define __swp_entry(type, offset) ((swp_entry_t) { pte_val(mk_swap_pte((type), (offset))) })
 #define __pte_to_swp_entry(pte) ((swp_entry_t) { pte_val(pte) })
 #define __swp_entry_to_pte(x)	((pte_t) { (x).val })
 
 /*
- * Bits 0, 4, 6, and 7 are taken. Let's leave bits 1, 2, 3, and 5 alone to
- * make things easier, and only use the upper 56 bits for the page offset...
+ * Leave low order 16 bits for the various page table bits, and only
+ * use the upper 48 bits for the page offset...
  */
-#define PTE_FILE_MAX_BITS	56
+#define PTE_FILE_MAX_BITS	48
 
-#define pte_to_pgoff(_pte)	((_pte).pte >> 8)
-#define pgoff_to_pte(off)	((pte_t) { ((off) << 8) | _PAGE_FILE })
+#define pte_to_pgoff(_pte)	((_pte).pte >> 16)
+#define pgoff_to_pte(off)	((pte_t) { ((off) << 16) | _PAGE_FILE })
 
 #endif /* _ASM_PGTABLE_64_H */

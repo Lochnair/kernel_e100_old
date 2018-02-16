@@ -28,6 +28,11 @@
 #include <linux/kexec.h>
 #include <linux/initrd.h>
 
+#include <linux/bootmem.h>
+#include <linux/memblock.h>
+
+#include <mmzone.h>
+
 #include <asm/processor.h>
 #include <asm/reboot.h>
 #include <asm/smp-ops.h>
@@ -39,7 +44,6 @@
 #include <asm/perf_event.h>
 
 #include <asm/octeon/octeon.h>
-#include <asm/octeon/octeon-boot-info.h>
 #include <asm/octeon/pci-octeon.h>
 #include <asm/octeon/cvmx-mio-defs.h>
 #include <asm/octeon/cvmx-rst-defs.h>
@@ -47,9 +51,9 @@
 #include <asm/octeon/cvmx-qlm.h>
 #include <asm/octeon/cvmx-debug.h>
 
-#define SDK_VERSION "3.1"
+#define SDK_VERSION "3.1.2"
 
-static unsigned long long MAX_MEMORY = 512ull << 20;
+static u64 max_memory = 512ull << 20;
 
 DEFINE_SEMAPHORE(octeon_bootbus_sem);
 EXPORT_SYMBOL(octeon_bootbus_sem);
@@ -60,6 +64,11 @@ struct cvmx_bootinfo *octeon_bootinfo;
 EXPORT_SYMBOL(octeon_bootinfo);
 
 static unsigned long long RESERVE_LOW_MEM = 0ull;
+
+const char octeon_not_compatible[] =
+	"ERROR: CONFIG_CAVIUM_OCTEON2 not compatible with this processor\r\n"
+	"You must rebuild the kernel to be able to use it on this system.\r\n";
+
 #ifdef CONFIG_KEXEC
 #ifdef CONFIG_SMP
 /*
@@ -76,8 +85,8 @@ static void octeon_kexec_smp_down(void *ignored)
 		cpu_relax();
 
 	asm volatile (
-	"	sync						\n"
-	"	synci	($0)					\n");
+	"	sync\n"
+	"	synci	($0)\n");
 
 	relocated_kexec_smp_wait(NULL);
 }
@@ -123,8 +132,11 @@ static void octeon_generic_shutdown(void)
 	secondary_kexec_args[2] = 0UL; /* running on secondary cpu */
 	secondary_kexec_args[3] = (unsigned long)octeon_boot_desc_ptr;
 	/* disable watchdogs */
-	for_each_online_cpu(cpu)
-		cvmx_write_csr(CVMX_CIU_WDOGX(cpu_logical_map(cpu)), 0);
+	for_each_online_cpu(cpu) {
+		int node = cpu_to_node(cpu);
+		unsigned int core = cpu_logical_map(cpu) & 0x3f;
+		cvmx_write_csr_node(node, CVMX_CIU_WDOGX(core), 0);
+	}
 #else
 	cvmx_write_csr(CVMX_CIU_WDOGX(cvmx_get_core_num()), 0);
 #endif
@@ -135,6 +147,7 @@ static void octeon_generic_shutdown(void)
 static void octeon_shutdown(void)
 {
 	octeon_generic_shutdown();
+	octeon_error_tree_shutdown();
 #ifdef CONFIG_SMP
 	smp_call_function(octeon_kexec_smp_down, NULL, 0);
 	smp_wmb();
@@ -148,6 +161,7 @@ static void octeon_shutdown(void)
 static void octeon_crash_shutdown(struct pt_regs *regs)
 {
 	octeon_generic_shutdown();
+	octeon_error_tree_shutdown();
 	default_machine_crash_shutdown(regs);
 }
 
@@ -257,16 +271,6 @@ int octeon_get_boot_uart(void)
 }
 
 /**
- * Get the coremask Linux was booted on.
- *
- * Returns Core mask
- */
-int octeon_get_boot_coremask(void)
-{
-	return octeon_boot_desc_ptr->core_mask;
-}
-
-/**
  * Check the hardware BIST results for a CPU
  */
 void octeon_check_cpu_bist(void)
@@ -287,8 +291,7 @@ void octeon_check_cpu_bist(void)
 	else
 		bist_val = read_octeon_c0_dcacheerr();
 	if (bist_val & 1)
-		pr_err("Core%d L1 Dcache parity error: "
-		       "CacheErr(dcache) = 0x%llx\n",
+		pr_err("Core%d L1 Dcache parity error: CacheErr(dcache) = 0x%llx\n",
 		       coreid, bist_val);
 
 	mask = 0xfc00000000000000ull;
@@ -374,6 +377,18 @@ static void octeon_halt(void)
 	octeon_kill_core(NULL);
 }
 
+static char __read_mostly octeon_system_type[80];
+
+static int __init init_octeon_system_type(void)
+{
+	snprintf(octeon_system_type, sizeof(octeon_system_type), "%s (%s)",
+		cvmx_board_type_to_string(octeon_bootinfo->board_type),
+		octeon_model_get_string(read_c0_prid()));
+
+	return 0;
+}
+early_initcall(init_octeon_system_type);
+
 /**
  * Return a string representing the system type
  *
@@ -390,8 +405,54 @@ const char *octeon_board_type_string(void)
 const char *get_system_type(void)
 	__attribute__ ((alias("octeon_board_type_string")));
 
+/* Try for a DIDTO of about 250 mS */
+static unsigned int calc_didto(void)
+{
+	unsigned int bit = 0;
+	u64 clk = octeon_get_clock_rate();
+
+	clk >>= 2; /* cycles in 250mS */
+	do {
+		clk >>= 1;
+		if (clk)
+			bit++;
+	} while (clk);
+
+	if (bit > 31)
+		return 0;
+
+	if (OCTEON_IS_OCTEON1PLUS()) {
+		switch (bit) {
+		case 31:
+			return 0;
+		case 30:
+			return 1;
+		default:
+			return 2;
+		}
+	} else {
+		switch (bit) {
+		case 31:
+			return 0;
+		case 30:
+			return 1;
+		case 29:
+			return 2;
+		case 28:
+			return 4;
+		case 27:
+			return 5;
+		case 26:
+			return 6;
+		default:
+			return 7;
+		}
+	}
+}
+
 void octeon_user_io_init(void)
 {
+	unsigned int v;
 	union octeon_cvmemctl cvmmemctl;
 
 	/* Get the current settings for CP0_CVMMEMCTL_REG */
@@ -454,8 +515,9 @@ void octeon_user_io_init(void)
 	 * = 231, 1 = 230, 2 = 229, 3 = 214. Actual time-out is
 	 * between 1x and 2x this interval. For example, with
 	 * DIDTTO=3, expiration interval is between 16K and 32K. */
-	cvmmemctl.s.didtto = 0;
-	cvmmemctl.s.didtto2 = 0;
+	v = calc_didto();
+	cvmmemctl.s.didtto = v & 3;
+	cvmmemctl.s.didtto2 = (v >> 2) & 1;
 	/* R/W If set, the (mem) CSR clock never turns off. */
 	cvmmemctl.s.csrckalwys = 0;
 	/* R/W If set, mclk never turns off. */
@@ -483,11 +545,13 @@ void octeon_user_io_init(void)
 
 	/* R/W If set, CVMSEG is available for loads/stores in
 	 * kernel/debug mode. */
-#if CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE > 0
 	cvmmemctl.s.cvmsegenak = 1;
-#else
-	cvmmemctl.s.cvmsegenak = 0;
-#endif
+	if (octeon_has_feature(OCTEON_FEATURE_PKO3)) {
+		/* Enable LMTDMA */
+		cvmmemctl.s.lmtena = 1;
+		/* Scratch line to use for LMT operation */
+		cvmmemctl.s.lmtline = 2;
+	}
 	/* R/W If set, CVMSEG is available for loads/stores in
 	 * supervisor mode. */
 	cvmmemctl.s.cvmsegenas = 0;
@@ -505,9 +569,9 @@ void octeon_user_io_init(void)
 
 	/* Setup of CVMSEG is done in kernel-entry-init.h */
 	if (smp_processor_id() == 0)
-		pr_notice("CVMSEG size: %d cache lines (%d bytes)\n",
-			  CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE,
-			  CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE * 128);
+		pr_notice("CVMSEG size: %u cache lines (%u bytes)\n",
+			  octeon_cvmseg_lines,
+			  octeon_cvmseg_lines * 128);
 
 	if (current_cpu_type() != CPU_CAVIUM_OCTEON3 ||
 	    OCTEON_IS_MODEL(OCTEON_CN70XX)) {
@@ -520,7 +584,7 @@ void octeon_user_io_init(void)
 		cvmx_write_csr(CVMX_IOB_FAU_TIMEOUT, fau_timeout.u64);
 	}
 
-	if (OCTEON_IS_MODEL(OCTEON_CN68XX)) {
+	if (OCTEON_IS_MODEL(OCTEON_CN68XX) || octeon_has_feature(OCTEON_FEATURE_CIU3)) {
 		union cvmx_sso_nw_tim nm_tim;
 		nm_tim.u64 = 0;
 		/* 4096 cycles */
@@ -592,6 +656,11 @@ void __init prom_init(void)
 	else
 		cvmx_coremask_set64(&sysinfo->core_mask,
 				    octeon_bootinfo->core_mask);
+
+	/* Some broken u-boot pass garbage in upper bits, clear them out */
+	if (!OCTEON_IS_MODEL(OCTEON_CN78XX))
+		for (i = 512; i < 1024; i++)
+			cvmx_coremask_clear_core(&sysinfo->core_mask, i);
 
 	sysinfo->exception_base_addr = octeon_bootinfo->exception_base_addr;
 	sysinfo->cpu_clock_hz = octeon_bootinfo->eclock_hz;
@@ -692,16 +761,14 @@ void __init prom_init(void)
 	 * Allocate memory for RESERVE32 aligned on 2MB boundary. This
 	 * is in case we later use hugetlb entries with it.
 	 */
-	if ( CONFIG_CAVIUM_RESERVE32 > 0 ) {
+	if (CONFIG_CAVIUM_RESERVE32 > 0) {
 		int64_t addr = -1;
-		addr = 
-			cvmx_bootmem_phy_named_block_alloc(
+		addr = cvmx_bootmem_phy_named_block_alloc(
 				CONFIG_CAVIUM_RESERVE32 << 20,
 				0, 0, 2 << 20,
 				"CAVIUM_RESERVE32", 0);
 		if (addr < 0)
-			pr_err("Failed to allocate "
-				"CAVIUM_RESERVE32 memory area\n");
+			pr_err("Failed to allocate CAVIUM_RESERVE32 memory area\n");
 		else
 			octeon_reserve32_memory = addr;
 	}
@@ -727,18 +794,18 @@ void __init prom_init(void)
 	if (OCTEON_IS_MODEL(OCTEON_CN38XX_PASS2) ||
 	    OCTEON_IS_MODEL(OCTEON_CN31XX))
 		cvmx_write_csr(CVMX_CIU_SOFT_BIST, 0);
-	else
+	else if (!octeon_has_feature(OCTEON_FEATURE_CIU3))
 		cvmx_write_csr(CVMX_CIU_SOFT_BIST, 1);
 
 	/* Default to 64MB in the simulator to speed things up */
 	if (octeon_is_simulation())
-		MAX_MEMORY = 64ull << 20;
+		max_memory = 64ull << 20;
 
 	arg = strstr(arcs_cmdline, "mem=");
 	if (arg) {
-		MAX_MEMORY = memparse(arg + 4, &p);
-		if (MAX_MEMORY == 0)
-			MAX_MEMORY = 32ull << 30;
+		max_memory = memparse(arg + 4, &p);
+		if (max_memory == 0)
+			max_memory = 2ull << 49;
 		if (*p == '@')
 			RESERVE_LOW_MEM = memparse(p + 1, &p);
 	}
@@ -768,9 +835,9 @@ void __init prom_init(void)
 				pr_err("Named Block[%d] = \"%s\"\n", j, named_memory_blocks[j]);
 		} else if ((strncmp(arg, "MEM=", 4) == 0) ||
 		    (strncmp(arg, "mem=", 4) == 0)) {
-			MAX_MEMORY = memparse(arg + 4, &p);
-			if (MAX_MEMORY == 0)
-				MAX_MEMORY = 32ull << 30;
+			max_memory = memparse(arg + 4, &p);
+			if (max_memory == 0)
+				max_memory = 2ull << 49;
 			if (*p == '@')
 				RESERVE_LOW_MEM = memparse(p + 1, &p);
 		} else if (strncmp(arg, "rd_name=", 8) == 0) {
@@ -780,8 +847,7 @@ void __init prom_init(void)
 		} else if (strcmp(arg, "ecc_verbose") == 0) {
 #ifdef CONFIG_CAVIUM_REPORT_SINGLE_BIT_ECC
 			__cvmx_interrupt_ecc_report_single_bit_errors = 1;
-			pr_notice("Reporting of single bit ECC errors is "
-				  "turned on\n");
+			pr_notice("Reporting of single bit ECC errors is turned on\n");
 #endif
 			goto append_arg;
 		} else {
@@ -817,11 +883,28 @@ append_arg:
 #endif
 
 	octeon_user_io_init();
+	octeon_setup_numa();
 	octeon_setup_smp();
 
 #ifdef CONFIG_CAVIUM_GDB
-	cvmx_debug_init ();
+	cvmx_debug_init();
 #endif
+
+#ifdef CONFIG_PCI
+	if (octeon_has_feature(OCTEON_FEATURE_PCIE)) {
+		if (octeon_has_feature(OCTEON_FEATURE_NPEI))
+			octeon_dma_bar_type = OCTEON_DMA_BAR_TYPE_PCIE;
+		else
+			octeon_dma_bar_type = OCTEON_DMA_BAR_TYPE_PCIE2;
+	} else {
+		if (OCTEON_IS_MODEL(OCTEON_CN31XX) ||
+		    OCTEON_IS_MODEL(OCTEON_CN38XX_PASS2))
+			octeon_dma_bar_type = OCTEON_DMA_BAR_TYPE_SMALL;
+		else
+			octeon_dma_bar_type = OCTEON_DMA_BAR_TYPE_BIG;
+	}
+#endif
+
 	pr_info("Cavium Inc. SDK-" SDK_VERSION "\n");
 }
 
@@ -929,10 +1012,22 @@ static __init void memory_exclude_page(u64 addr, u64 *mem, u64 *size)
 
 void __init plat_mem_setup(void)
 {
-	uint64_t mem_alloc_size;
-	uint64_t total = 0;
-	int64_t memory;
+	u64 mem_alloc_size = 4 << 20;
+	u64 mem_32_size;
+	u64 total = 0;
+	s64 memory;
+	u64 limit_max, limit_min;
 	const struct cvmx_bootmem_named_block_desc *named_block;
+	u64 system_limit = cvmx_bootmem_available_mem(mem_alloc_size);
+
+#ifndef CONFIG_NUMA
+	int last_core;
+	struct cvmx_sysinfo *sysinfo = cvmx_sysinfo_get();
+
+	last_core = cvmx_coremask_get_last_core(&sysinfo->core_mask);
+	if (last_core >= CVMX_COREMASK_MAX_CORES_PER_NODE)
+		panic("Must build kernel with CONFIG_NUMA for multi-node system.");
+#endif
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (rd_name[0]) {
@@ -951,11 +1046,16 @@ void __init plat_mem_setup(void)
 #endif
 
 	if (named_memory_blocks[0][0]) {
+		phys_t kernel_begin, kernel_end;
+		phys_t block_begin, block_size;
 		/* Memory from named blocks only */
 		int i;
 
+		kernel_begin = PFN_DOWN(__pa_symbol(&_text)) << PAGE_SHIFT;
+		kernel_end = PFN_UP(__pa_symbol(&_end)) << PAGE_SHIFT;
+
 		for (i = 0;
-		     named_memory_blocks[i][0] && i < ARRAY_SIZE(named_memory_blocks);
+		     i < ARRAY_SIZE(named_memory_blocks) && named_memory_blocks[i][0];
 		     i++) {
 			named_block = cvmx_bootmem_find_named_block(named_memory_blocks[i]);
 			if (!named_block) {
@@ -967,44 +1067,53 @@ void __init plat_mem_setup(void)
 				named_memory_blocks[i],
 				(unsigned long)named_block->size,
 				(unsigned long)named_block->base_addr);
-			add_memory_region(named_block->base_addr, named_block->size,
-					  BOOT_MEM_RAM);
-			total += named_block->size;
+
+			block_begin = named_block->base_addr;
+			block_size = named_block->size;
+			if (kernel_begin <= block_begin && kernel_end >= block_begin + block_size)
+				continue;
+
+			if (kernel_begin > block_begin && kernel_begin < block_begin + block_size) {
+				u64 sz = kernel_begin - named_block->base_addr;
+				add_memory_region(named_block->base_addr, sz, BOOT_MEM_RAM);
+				total += sz;
+				if (block_begin + block_size <= kernel_end)
+					continue;
+				block_size = block_begin + block_size - kernel_end;
+				block_begin = kernel_end;
+			}
+			if (kernel_end > block_begin && kernel_end < block_begin + block_size) {
+				block_size = block_begin + block_size - kernel_end;
+				block_begin = kernel_end;
+			}
+			add_memory_region(block_begin, block_size, BOOT_MEM_RAM);
+			total += block_size;
 		}
 		goto mem_alloc_done;
 	}
 
-	/*
-	 * The Mips memory init uses the first memory location for
-	 * some memory vectors. When SPARSEMEM is in use, it doesn't
-	 * verify that the size is big enough for the final
-	 * vectors. Making the smallest chuck 4MB seems to be enough
-	 * to consistently work.
-	 */
-	mem_alloc_size = 4 << 20;
-	if (mem_alloc_size > MAX_MEMORY)
-		mem_alloc_size = MAX_MEMORY;
+	if (mem_alloc_size > max_memory)
+		mem_alloc_size = max_memory;
+
+	if (system_limit > max_memory)
+		system_limit = max_memory;
+	/* Try to get 1024MB of 32-bit memory */
+	mem_32_size = 1024 * (1 << 20);
 
 	cvmx_bootmem_lock();
-	while ((boot_mem_map.nr_map < BOOT_MEM_MAP_MAX)
-		&& (total < MAX_MEMORY)) {
-#if defined(CONFIG_64BIT) || defined(CONFIG_64BIT_PHYS_ADDR)
+	limit_max = 0xffffffffull;
+	limit_min = 0;
+	while ((boot_mem_map.nr_map < BOOT_MEM_MAP_MAX) && (total < max_memory)) {
+
+		if (total >= mem_32_size)
+			limit_max = ~0ull;		/* unlimitted */
+
 		memory = cvmx_bootmem_phy_alloc(mem_alloc_size,
-						__pa_symbol(&__init_end), -1,
-						0x100000,
-						CVMX_BOOTMEM_FLAG_NO_LOCKING);
-#elif defined(CONFIG_HIGHMEM)
-		memory = cvmx_bootmem_phy_alloc(mem_alloc_size, 0, 1ull << 31,
-						0x100000,
-						CVMX_BOOTMEM_FLAG_NO_LOCKING);
-#else
-		memory = cvmx_bootmem_phy_alloc(mem_alloc_size, 0, 512 << 20,
-						0x100000,
-						CVMX_BOOTMEM_FLAG_NO_LOCKING);
-#endif
+				limit_min, limit_max, 0x100000,
+				CVMX_BOOTMEM_FLAG_NO_LOCKING);
+
 		if (memory >= 0) {
 			u64 size = mem_alloc_size;
-
 			/*
 			 * exclude a page at the beginning and end of
 			 * the 256MB PCIe 'hole' so the kernel will not
@@ -1026,7 +1135,10 @@ void __init plat_mem_setup(void)
 				add_memory_region(memory, size, BOOT_MEM_RAM);
 			total += mem_alloc_size;
 		} else {
-			break;
+			if (limit_max < ~0ull)
+				limit_max = ~0ull;		/* unlimitted */
+			else
+				break;
 		}
 	}
 	cvmx_bootmem_unlock();
@@ -1042,11 +1154,104 @@ mem_alloc_done:
 		cvmx_bootmem_free_named("CAVIUM_RESERVE32");
 
 	if (total == 0)
-		panic("Unable to allocate memory from "
-		      "cvmx_bootmem_phy_alloc\n");
+		panic("Unable to allocate memory from cvmx_bootmem_phy_alloc\n");
 
 	/* Initialize QLM and also apply any erratas */
 	cvmx_qlm_init();
+}
+
+struct node_data __node_data[4];
+EXPORT_SYMBOL(__node_data);
+
+void __init mach_bootmem_init(void)
+{
+	int i;
+	int node;
+
+	min_low_pfn = ~0UL;
+	max_low_pfn = 0;
+
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		unsigned long start, end;
+		struct node_data *nd;
+		bool is_usable;
+
+		switch (boot_mem_map.map[i].type) {
+		case BOOT_MEM_RAM:
+			is_usable = true;
+			break;
+		case BOOT_MEM_KERNEL:
+		case BOOT_MEM_INIT_RAM:
+			is_usable = false;
+			break;
+		default:
+			/* Not usable memory */
+			continue;
+		}
+		start = PFN_UP(boot_mem_map.map[i].addr);
+		end = PFN_DOWN(boot_mem_map.map[i].addr
+				+ boot_mem_map.map[i].size);
+		node = pa_to_nid(boot_mem_map.map[i].addr);
+		nd = __node_data + node;
+
+		if (max_low_pfn < end)
+			max_low_pfn = end;
+		if (min_low_pfn > start)
+			min_low_pfn = start;
+
+		memblock_add_node(PFN_PHYS(start), PFN_PHYS(end - start), node);
+
+		if (nd->endpfn == 0) {
+			nd->startpfn = start;
+			nd->endpfn = end;
+		} else {
+			if (nd->startpfn > start)
+				nd->startpfn = start;
+			if (nd->endpfn < end)
+				nd->endpfn = end;
+		}
+		if (is_usable && (nd->startmempfn == 0 || start < nd->startmempfn))
+			nd->startmempfn = start;
+	}
+	num_physpages = 0;
+
+	for_each_online_node(node) {
+		unsigned long bootmap_size;
+		struct node_data *nd = __node_data + node;
+		if (nd->endpfn == 0)
+			continue;
+		NODE_DATA(node)->bdata = &bootmem_node_data[node];
+		bootmap_size = init_bootmem_node(NODE_DATA(node), nd->startmempfn, nd->startpfn,  nd->endpfn);
+
+		for (i = 0; i < boot_mem_map.nr_map; i++) {
+			int map_nid;
+			bool is_init;
+
+			switch (boot_mem_map.map[i].type) {
+			case BOOT_MEM_RAM:
+				is_init = false;
+				break;
+			case BOOT_MEM_INIT_RAM:
+				is_init = true;
+				break;
+			default:
+				/* Not usable memory */
+				continue;
+			}
+			map_nid = pa_to_nid(boot_mem_map.map[i].addr);
+			if (map_nid != node)
+				continue;
+			memory_present(node,
+				       PFN_DOWN(boot_mem_map.map[i].addr),
+				       PFN_UP(boot_mem_map.map[i].addr + boot_mem_map.map[i].size));
+			if (!is_init) {
+				num_physpages += PFN_DOWN(boot_mem_map.map[i].size);
+				memblock_add_node(boot_mem_map.map[i].addr, boot_mem_map.map[i].size, node);
+				free_bootmem_node(NODE_DATA(node), boot_mem_map.map[i].addr, boot_mem_map.map[i].size);
+			}
+		}
+		reserve_bootmem(PFN_PHYS(nd->startmempfn), bootmap_size, BOOTMEM_DEFAULT);
+	}
 }
 
 /*
@@ -1144,13 +1349,6 @@ void __init device_tree_init(void)
 		}
 		do_prune = false;
 		do_set_mac = true;
-	} else if (octeon_bootinfo->board_type == CVMX_BOARD_TYPE_UBNT_E120) {
-		fdt = (struct boot_param_header *)
-			&__dtb_ubnt_e100_begin;
-		dt_size = &__dtb_ubnt_e100_end
-			- &__dtb_ubnt_e100_begin;
-		do_prune = false;
-		do_set_mac = true;
 	} else {
 		fdt = (struct boot_param_header *)&__dtb_octeon_3xxx_begin;
 		dt_size = &__dtb_octeon_3xxx_end - &__dtb_octeon_3xxx_begin;
@@ -1193,7 +1391,9 @@ static int __init edac_devinit(void)
 	struct platform_device *dev;
 	int i, err = 0;
 	int num_lmc;
+	int num_tad;
 	char *name;
+	int node;
 
 	if (disable_octeon_edac_p)
 		return 0;
@@ -1207,17 +1407,49 @@ static int __init edac_devinit(void)
 		}
 	}
 
-	num_lmc = OCTEON_IS_MODEL(OCTEON_CN68XX) ? 4 :
-		(OCTEON_IS_MODEL(OCTEON_CN56XX) ? 2 : 1);
+	num_lmc = (OCTEON_IS_MODEL(OCTEON_CN68XX)
+		   || OCTEON_IS_MODEL(OCTEON_CN78XX)) ? 4 :
+		((OCTEON_IS_MODEL(OCTEON_CN56XX)
+		  || OCTEON_IS_MODEL(OCTEON_CN73XX)
+		  || OCTEON_IS_MODEL(OCTEON_CNF75XX)) ? 2 : 1);
+	num_tad = OCTEON_IS_MODEL(OCTEON_CN78XX) ? 8 :
+			(OCTEON_IS_MODEL(OCTEON_CN68XX)
+			 || (OCTEON_IS_OCTEON3()
+			     && !OCTEON_IS_MODEL(OCTEON_CN70XX))) ? 4 : 1;
+
+	for_each_online_node(node) {
 	for (i = 0; i < num_lmc; i++) {
-		dev = platform_device_register_simple("octeon_lmc_edac",
-						      i, NULL, 0);
+			struct octeon_edac_lmc_data lmc_data;
+
+			lmc_data.node = node;
+			lmc_data.lmc = i;
+			dev = platform_device_register_data(NULL,
+							    "octeon_lmc_edac",
+							    node * num_lmc + i,
+							    &lmc_data,
+							    sizeof(lmc_data));
 		if (IS_ERR(dev)) {
 			pr_err("Registation of octeon_lmc_edac %d failed!\n", i);
 			err = PTR_ERR(dev);
 		}
 	}
+		for (i = 0; i < num_tad; i++) {
+			struct octeon_edac_l2c_data l2c_data;
 
+			l2c_data.node = node;
+			l2c_data.tad = i;
+			dev = platform_device_register_data(NULL,
+							    "octeon_l2c_edac",
+							    node * num_tad + i,
+							    &l2c_data,
+							    sizeof(l2c_data));
+			if (IS_ERR(dev)) {
+				pr_err("Registration of octeon_l2c_edac %d:%d failed!\n",
+				       node, i);
+				err = PTR_ERR(dev);
+			}
+		}
+	}
 	return err;
 }
 device_initcall(edac_devinit);

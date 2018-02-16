@@ -137,11 +137,6 @@ static inline int pci_get_legacy_ide_irq(struct pci_dev *dev, int channel)
 	return channel ? 15 : 14;
 }
 
-#ifdef CONFIG_CPU_CAVIUM_OCTEON
-/* MSI arch hook for OCTEON */
-#define arch_setup_msi_irqs arch_setup_msi_irqs
-#endif
-
 extern char * (*pcibios_plat_setup)(char *str);
 
 #ifdef CONFIG_OF
@@ -151,6 +146,11 @@ extern void pci_load_of_ranges(struct pci_controller *hose,
 #else
 static inline void pci_load_of_ranges(struct pci_controller *hose,
 				      struct device_node *node) {}
+#endif
+
+#ifdef CONFIG_CAVIUM_OCTEON_SOC
+/* MSI arch hook */
+#define arch_setup_msi_irqs arch_setup_msi_irqs
 #endif
 
 #endif /* _ASM_PCI_H */

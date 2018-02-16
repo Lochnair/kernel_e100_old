@@ -24,25 +24,6 @@
 
 #include "kvm/pci.h"
 
-#include "xics.h"
-#include "spapr_pci.h"
-
-/*
- * FIXME: The code in this file assumes an SPAPR guest, using XICS.  Make
- * generic & cope with multiple PPC platform types.
- */
-
-int irq__register_device(u32 dev, u8 *pin, u8 *line)
-{
-	*pin = 1;
-	/*
-	 * Have I said how nasty I find this?  Line should be dontcare... PHB
-	 * should determine which CPU/XICS IRQ to fire.
-	 */
-	*line = xics_alloc_irqnum();
-	return 0;
-}
-
 int irq__add_msix_route(struct kvm *kvm, struct msi_msg *msg)
 {
 	die(__FUNCTION__);

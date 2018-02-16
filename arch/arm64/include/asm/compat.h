@@ -24,7 +24,6 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <asm/hwcap.h>
 
 #define COMPAT_USER_HZ		100
 #ifdef __AARCH64EB__
@@ -38,8 +37,8 @@ typedef s32		compat_ssize_t;
 typedef s32		compat_time_t;
 typedef s32		compat_clock_t;
 typedef s32		compat_pid_t;
-typedef u32		__compat_uid_t;
-typedef u32		__compat_gid_t;
+typedef u16		__compat_uid_t;
+typedef u16		__compat_gid_t;
 typedef u16		__compat_uid16_t;
 typedef u16		__compat_gid16_t;
 typedef u32		__compat_uid32_t;
@@ -67,8 +66,6 @@ typedef u32		compat_ulong_t;
 typedef u64		compat_u64;
 typedef u32		compat_uptr_t;
 
-typedef s64		ilp32_clock_t __attribute__((aligned(4)));
-
 struct compat_timespec {
 	compat_time_t	tv_sec;
 	s32		tv_nsec;
@@ -78,6 +75,9 @@ struct compat_timeval {
 	compat_time_t	tv_sec;
 	s32		tv_usec;
 };
+
+/* ILP32 uses 64bit time_t and not the above compat structures */
+#define COMPAT_USE_64BIT_TIME (!is_a32_compat_task())
 
 struct compat_stat {
 	compat_dev_t	st_dev;
@@ -187,15 +187,6 @@ typedef struct compat_siginfo {
 			compat_clock_t _stime;
 		} _sigchld;
 
-		/* SIGCHLD (ILP32 version) */
-		struct {
-			compat_pid_t _pid;	/* which child */
-			__compat_uid32_t _uid;	/* sender's uid */
-			int _status;		/* exit code */
-			ilp32_clock_t _utime;
-			ilp32_clock_t _stime;
-		} _sigchld_ilp32;
-
 		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
 		struct {
 			compat_uptr_t _addr; /* faulting insn/memory ref. */
@@ -210,25 +201,11 @@ typedef struct compat_siginfo {
 	} _sifields;
 } compat_siginfo_t;
 
+/* ILP32 uses the native siginfo and not the compat struct */
+#define COMPAT_USE_NATIVE_SIGINFO	(!is_a32_compat_task())
+
 #define COMPAT_OFF_T_MAX	0x7fffffff
 #define COMPAT_LOFF_T_MAX	0x7fffffffffffffffL
-
-/* AArch32 registers. */
-#define COMPAT_ELF_NGREG		18
-typedef unsigned int			compat_a32_elf_greg_t;
-typedef compat_a32_elf_greg_t		compat_a32_elf_gregset_t[COMPAT_ELF_NGREG];
-#ifdef CONFIG_ARM64_ILP32
-typedef unsigned long			compat_elf_greg_t;
-typedef compat_elf_greg_t		compat_elf_gregset_t[32+2];
-#define PR_REG_SIZE(S)			(test_thread_flag(TIF_32BIT) ? 72 : 272)
-#define PRSTATUS_SIZE(S)		(test_thread_flag(TIF_32BIT) ? 124 : (test_thread_flag(TIF_32BIT_AARCH64) ? 352 : 392))
-#define SET_PR_FPVALID(S,V) \
-  do { *(int *) (((void *) &((S)->pr_reg)) + PR_REG_SIZE((S)->pr_reg)) = (V); } \
-  while (0)
-#else
-typedef compat_a32_elf_greg_t		compat_elf_greg_t;
-typedef compat_elf_greg_t		compat_elf_gregset_t[COMPAT_ELF_NGREG];
-#endif
 
 /*
  * A pointer passed in from user mode. This should not
@@ -247,19 +224,7 @@ static inline compat_uptr_t ptr_to_compat(void __user *uptr)
 	return (u32)(unsigned long)uptr;
 }
 
-#if defined(CONFIG_ARM64_ILP32)
-#define is_ilp32_compat_task() (test_thread_flag(TIF_32BIT_AARCH64))
-#else
-#define is_ilp32_compat_task() (0)
-#endif
-
-#define COMPAT_USE_64BIT_TIME is_ilp32_compat_task()
-
-/* AARCH64 ILP32 vs AARCH32 differences. */
-#define compat_user_stack_pointer() 			\
-	(is_ilp32_compat_task()		  		\
-	 ? current_user_stack_pointer ()		\
-	 : current_pt_regs()->compat_sp)
+#define compat_user_stack_pointer() (user_stack_pointer(current_pt_regs()))
 
 static inline void __user *arch_compat_alloc_user_space(long len)
 {
@@ -324,84 +289,71 @@ struct compat_shmid64_ds {
 	compat_ulong_t __unused5;
 };
 
-
-#ifdef CONFIG_AARCH32_EL0
-static inline int is_aarch32_task(void)
+static inline int is_compat_task(void)
 {
 	return test_thread_flag(TIF_32BIT);
 }
 
-static inline int is_aarch32_thread(struct thread_info *thread)
+static inline int is_compat_thread(struct thread_info *thread)
 {
 	return test_ti_thread_flag(thread, TIF_32BIT);
 }
-#else
-static inline int is_aarch32_task(void)
+
+#else /* !CONFIG_COMPAT */
+
+static inline int is_compat_task(void)
 {
 	return 0;
 }
 
-static inline int is_aarch32_thread(struct thread_info *thread)
+static inline int is_compat_thread(struct thread_info *thread)
 {
 	return 0;
-}
-#endif /* CONFIG_AARCH32_EL0 */
-
-#ifdef CONFIG_ARM64_ILP32
-static inline int is_a64_ilp32_task(void)
-{
-  return test_thread_flag(TIF_32BIT_AARCH64);
-}
-static inline int is_a64_ilp32_thread(struct thread_info *thread)
-{
-  return test_ti_thread_flag(thread, TIF_32BIT_AARCH64);
-}
-#else
-static inline int is_a64_ilp32_thread(struct thread_info *thread)
-{
-  return 0;
-}
-static inline int is_a64_ilp32_task(void)
-{
-  return 0;
-}
-#endif /* CONFIG_ARM64_ILP32 */
-
-static inline int compat_elf_hwcap(void)
-{
-    if(is_aarch32_task())
-        return COMPAT_ELF_HWCAP_AARCH32;
-    else
-        return ELF_HWCAP;
-}
-
-#else
-static inline int is_aarch32_task(void)
-{
-	return 0;
-}
-
-static inline int is_a64_ilp32_task(void)
-{
-  return 0;
-}
-
-static inline int is_aarch32_thread(struct thread_info *thread)
-{
-	return 0;
-}
-
-static inline int is_a64_ilp32_thread(struct thread_info *thread)
-{
-  return 0;
 }
 
 #endif /* CONFIG_COMPAT */
 
-static inline int is_compat_task(void)
+#ifdef CONFIG_AARCH32_EL0
+static inline int is_a32_compat_task(void)
 {
-	return is_aarch32_task() || is_a64_ilp32_task();
+	return test_thread_flag(TIF_AARCH32);
 }
+static inline int is_a32_compat_thread(struct thread_info *thread)
+{
+	return test_ti_thread_flag(thread, TIF_AARCH32);
+}
+#else
+static inline int is_a32_compat_task(void)
+{
+	return 0;
+}
+static inline int is_a32_compat_thread(struct thread_info *thread)
+{
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_ARM64_ILP32
+static inline int is_ilp32_compat_task(void)
+{
+	return test_thread_flag(TIF_32BIT) && !is_a32_compat_task();
+}
+static inline int is_ilp32_compat_thread(struct thread_info *thread)
+{
+	return test_ti_thread_flag(thread, TIF_32BIT) &&
+	       !is_a32_compat_thread(thread);
+}
+#else
+static inline int is_ilp32_compat_task(void)
+{
+	return 0;
+}
+static inline int is_ilp32_compat_thread(struct thread_info *thread)
+{
+	return 0;
+}
+#endif
+
 
 #endif /* __KERNEL__ */
 #endif /* __ASM_COMPAT_H */

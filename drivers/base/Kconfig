@@ -231,6 +231,7 @@ comment "Default contiguous memory area size:"
 config CMA_SIZE_MBYTES
 	int "Size in Mega Bytes"
 	depends on !CMA_SIZE_SEL_PERCENTAGE
+	default 256 if NET_VENDOR_CAVIUM
 	default 16
 	help
 	  Defines the size (in MiB) of the default memory area for Contiguous

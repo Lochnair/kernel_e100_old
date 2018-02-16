@@ -108,7 +108,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	/* Setup BAR2 */
 	sriomaintx_m2s_bar2_start.u32 = 0;
 	sriomaintx_m2s_bar2_start.s.addr64 = BAR2_ADDRESS >> 48;
-	sriomaintx_m2s_bar2_start.s.addr48 = BAR2_ADDRESS >> 41;
+	sriomaintx_m2s_bar2_start.cn63xx.addr48 = BAR2_ADDRESS >> 41;
 	sriomaintx_m2s_bar2_start.s.esx = 0;
 	sriomaintx_m2s_bar2_start.s.cax = 0;
 	sriomaintx_m2s_bar2_start.s.addr66 = 0; /* BAR2_ADDRESS >> 64; */
@@ -138,7 +138,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	sriomaintx_m2s_bar1_start0.s.addr64 = BAR1_ADDRESS >> 48;
 	sriomaintx_m2s_bar1_start0.s.addr48 = BAR1_ADDRESS >> 32;
 	sriomaintx_m2s_bar1_start1.u32 = 0;
-	sriomaintx_m2s_bar1_start1.s.addr32 = (BAR1_ADDRESS >> 20) & 0xfff;
+	sriomaintx_m2s_bar1_start1.cn63xx.addr32 = (BAR1_ADDRESS >> 20) & 0xfff;
 	sriomaintx_m2s_bar1_start1.s.barsize = BAR1_SHIFT;
 	sriomaintx_m2s_bar1_start1.s.addr66 = 0; /* BAR1_ADDRESS >> 64; */
 	sriomaintx_m2s_bar1_start1.s.enable = 1;
@@ -156,7 +156,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	sriomaintx_m2s_bar0_start0.s.addr64 = BAR0_ADDRESS >> 48;
 	sriomaintx_m2s_bar0_start0.s.addr48 = BAR0_ADDRESS >> 32;
 	sriomaintx_m2s_bar0_start1.u32 = 0;
-	sriomaintx_m2s_bar0_start1.s.addr32 = (BAR0_ADDRESS >> 14) & 0x3ffff;
+	sriomaintx_m2s_bar0_start1.cn63xx.addr32 = (BAR0_ADDRESS >> 14) & 0x3ffff;
 	sriomaintx_m2s_bar0_start1.s.addr66 = 0; /* BAR0_ADDRESS >> 64; */
 	sriomaintx_m2s_bar0_start1.s.enable = 1;
 	if (rio_write_config_32(dev, CVMX_SRIOMAINTX_M2S_BAR0_START0(0),
@@ -206,7 +206,7 @@ static int cn6xxx_probe(struct rio_dev *dev, const struct rio_device_id *id)
 	for (index = 0; index < 16; index++) {
 		union cvmx_sriomaintx_bar1_idxx sriomaintx_bar1_idxx;
 		sriomaintx_bar1_idxx.u32 = 0;
-		sriomaintx_bar1_idxx.s.la = index;
+		sriomaintx_bar1_idxx.cn63xx.la = index;
 		sriomaintx_bar1_idxx.s.enable = 1;
 		if (rio_write_config_32(dev, CVMX_SRIOMAINTX_BAR1_IDXX(index, 0),
 			sriomaintx_bar1_idxx.u32))

@@ -17,9 +17,9 @@
 #define __ASM_PGTABLE_HWDEF_H
 
 #ifdef CONFIG_ARM64_64K_PAGES
-#include <asm/pgtable-3level-hwdef.h>
+#include <asm/pgtable-2level-hwdef.h>
 #else
-#include <asm/pgtable-4level-hwdef.h>
+#include <asm/pgtable-3level-hwdef.h>
 #endif
 
 /*
@@ -79,10 +79,17 @@
 #define PTE_ATTRINDX(t)		(_AT(pteval_t, (t)) << 2)
 #define PTE_ATTRINDX_MASK	(_AT(pteval_t, 7) << 2)
 
+#ifdef CONFIG_ARCH_SUPPORTS_48BIT_PA
 /*
- * 48-bit physical address supported.
+ * 48-bit physical address supported
  */
 #define PHYS_MASK_SHIFT		(48)
+#else
+/*
+ * 40-bit physical address supported.
+ */
+#define PHYS_MASK_SHIFT		(40)
+#endif
 #define PHYS_MASK		((UL(1) << PHYS_MASK_SHIFT) - 1)
 
 /*
@@ -102,8 +109,14 @@
 #define TCR_SHARED		((UL(3) << 12) | (UL(3) << 28))
 #define TCR_TG0_64K		(UL(1) << 14)
 #define TCR_TG1_64K		(UL(1) << 30)
-#define TCR_IPS_40BIT		(UL(2) << 32)
 #define TCR_IPS_48BIT		(UL(5) << 32)
+#define TCR_IPS_40BIT		(UL(2) << 32)
 #define TCR_ASID16		(UL(1) << 36)
+
+#ifdef CONFIG_ARCH_SUPPORTS_48BIT_PA
+#define TCR_IPS_BITS		TCR_IPS_48BIT
+#else
+#define TCR_IPS_BITS		TCR_IPS_40BIT
+#endif
 
 #endif

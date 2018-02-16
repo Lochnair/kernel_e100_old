@@ -116,7 +116,7 @@ static inline struct thread_info *current_thread_info(void)
 #define TIF_SINGLESTEP		21
 #define TIF_32BIT		22	/* 32bit process */
 #define TIF_SWITCH_MM		23	/* deferred switch_mm */
-#define TIF_32BIT_AARCH64	24	/* 32 bit process on AArch64(ILP32)  */ 
+#define TIF_AARCH32		24	/* AARCH32 process */
 
 #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)

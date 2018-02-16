@@ -347,11 +347,7 @@ static int __init kgdboc_early_init(char *opt)
 early_param("ekgdboc", kgdboc_early_init);
 #endif /* CONFIG_KGDB_SERIAL_CONSOLE */
 
-#ifdef CONFIG_CPU_CAVIUM_OCTEON
-late_initcall(init_kgdboc);
-#else
 module_init(init_kgdboc);
-#endif
 module_exit(cleanup_kgdboc);
 module_param_call(kgdboc, param_set_kgdboc_var, param_get_string, &kps, 0644);
 MODULE_PARM_DESC(kgdboc, "<serial_device>[,baud]");

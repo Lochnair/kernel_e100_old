@@ -22,6 +22,7 @@
 
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/irqchip/arm-gic-v3.h>
 
 #include <asm/assembler.h>
 #include <asm/ptrace.h>
@@ -45,20 +46,17 @@
 #error KERNEL_RAM_VADDR must start at 0xXXX80000
 #endif
 
-#ifdef CONFIG_ARM64_64K_PAGES
-#define create_page_entry	create_pmd_entry
-#else
-#define create_page_entry	create_pud_entry
-#endif
-
-#define SWAPPER_DIR_SIZE	(4 * PAGE_SIZE)
-#define IDMAP_DIR_SIZE		(3 * PAGE_SIZE)
+#define SWAPPER_DIR_SIZE	(3 * PAGE_SIZE)
+#define IDMAP_DIR_SIZE		(2 * PAGE_SIZE)
 
 	.globl	swapper_pg_dir
 	.equ	swapper_pg_dir, KERNEL_RAM_VADDR - SWAPPER_DIR_SIZE
 
-	.globl	idmap_pg_dir
-	.equ	idmap_pg_dir, swapper_pg_dir - IDMAP_DIR_SIZE
+	.globl  idmap_pg_dir
+	.equ    idmap_pg_dir, swapper_pg_dir - IDMAP_DIR_SIZE
+
+	.globl	swapper_pg_dir_pax
+	.equ	swapper_pg_dir_pax, idmap_pg_dir - SWAPPER_DIR_SIZE
 
 	.macro	pgtbl, ttb0, ttb1, phys
 	add	\ttb1, \phys, #TEXT_OFFSET - SWAPPER_DIR_SIZE
@@ -118,6 +116,14 @@
 	.quad	TEXT_OFFSET			// Image load offset from start of RAM
 	.quad	0				// reserved
 	.quad	0				// reserved
+	.quad	0				// reserved
+	.quad	0				// reserved
+	.quad	0				// reserved
+	.byte	0x41				// Magic number, "ARM\x64"
+	.byte	0x52
+	.byte	0x4d
+	.byte	0x64
+	.word	0				// reserved
 
 ENTRY(stext)
 	mov	x21, x0				// x21=FDT
@@ -135,9 +141,6 @@ ENTRY(stext)
 	cbz	x23, __error_p			// invalid processor (x23=0)?
 	bl	__vet_fdt
 	bl	__create_page_tables		// x25=TTBR0, x26=TTBR1
-
-	mov	x5, #0x7			// SRE | DFB | DIB
-	msr	ICC_SRE_EL1, x5			// ICC_SRE_EL1
 
 	/*
 	 * The following calls CPU specific code in a position independent
@@ -180,6 +183,23 @@ ENTRY(el2_setup)
 	msr	cnthctl_el2, x0
 	msr	cntvoff_el2, xzr		// Clear virtual offset
 
+#ifdef CONFIG_ARM_GIC_V3
+	/* GICv3 system register access */
+	mrs	x0, id_aa64pfr0_el1
+	ubfx	x0, x0, #24, #4
+	cmp	x0, #1
+	b.ne	3f
+
+	mrs_s	x0, ICC_SRE_EL2
+	orr	x0, x0, #ICC_SRE_EL2_SRE	// Set ICC_SRE_EL2.SRE==1
+	orr	x0, x0, #ICC_SRE_EL2_ENABLE	// Set ICC_SRE_EL2.Enable==1
+	msr_s	ICC_SRE_EL2, x0
+	isb					// Make sure SRE is now set
+	msr_s	ICH_HCR_EL2, xzr		// Reset ICC_HCR_EL2 to defaults
+
+3:
+#endif
+
 	/* Populate ID registers. */
 	mrs	x0, midr_el1
 	mrs	x1, mpidr_el1
@@ -198,20 +218,21 @@ ENTRY(el2_setup)
 	mov	x0, #0x33ff
 	msr	cptr_el2, x0			// Disable copro. traps to EL2
 
-#ifdef CONFIG_COMPAT
+#ifdef CONFIG_AARCH32_EL0
 	msr	hstr_el2, xzr			// Disable CP15 traps to EL2
 #endif
+
+	/* EL2 debug */
+	mrs	x0, pmcr_el0			// Disable debug access traps
+	ubfx	x0, x0, #11, #5			// to EL2 and allow access to
+	msr	mdcr_el2, x0			// all PMU counters from EL1
 
 	/* Stage-2 translation */
 	msr	vttbr_el2, xzr
 
 	/* Hypervisor stub */
-	adr	x0, __hyp_stub_vectors
+	adrp	x0, __hyp_stub_vectors
 	msr	vbar_el2, x0
-
-	/* GIC System Registers */
-	mov	x0, #0xf			// SRE | DFB | DIB | ENABLE
-	msr	ICC_SRE_EL2, x0
 
 	/* spsr */
 	mov	x0, #(PSR_F_BIT | PSR_I_BIT | PSR_A_BIT | PSR_D_BIT |\
@@ -259,13 +280,6 @@ ENTRY(secondary_holding_pen)
 	/* Calculate the CPU number */
 	mrs	x0, mpidr_el1
 	ldr     x1, =MPIDR_HWID_BITMASK
-	and	x0, x0, x1
-	and	x1, x0, #0xf
-	lsr	x0, x0, #8
-	add	x0, x1, x0, lsl #4
-
-	mov	x5, #0x7			// SRE | DFB | DIB
-	msr	ICC_SRE_EL1, x5			// ICC_SRE_EL1
 
 	adr	x1, 1b
 	ldp	x2, x3, [x1]
@@ -300,7 +314,7 @@ ENTRY(secondary_entry)
 	add	x0, x1, x0, lsl #4
 	
 	mov	x5, #0x7			// SRE | DFB | DIB
-	msr	ICC_SRE_EL1, x5			// ICC_SRE_EL1
+	msr_s	ICC_SRE_EL1, x5			// ICC_SRE_EL1
 
 	b	secondary_startup
 ENDPROC(secondary_entry)
@@ -394,33 +408,6 @@ ENDPROC(__calc_phys_offset)
 	str	\tmp2, [\pgd, \tmp1, lsl #3]
 	.endm
 
- /* Macro to populate the PUD for the corresponding block entry in the next
- * level (tbl) for the given virtual address.
- *
- * Preserves:  pud, tbl, virt
- * Corrupts:   tmp1, tmp2
- */
-       .macro  create_pud_entry, pud, tbl, virt, tmp1, tmp2
-       lsr     \tmp1, \virt, #PUD_SHIFT
-       and     \tmp1, \tmp1, #PTRS_PER_PUD - 1 // PUD index
-       orr     \tmp2, \tbl, #3                 // PUD entry table type
-       str     \tmp2, [\pud, \tmp1, lsl #3]
-       .endm
-
-/*
- * Macro to populate the PMD for the corresponding block entry in the next
- * level (tbl) for the given virtual address.
- *
- * Preserves:	pmd, tbl, virt
- * Corrupts:	tmp1, tmp2
- */
-	.macro	create_pmd_entry, pud, tbl, virt, tmp1, tmp2
-	lsr	\tmp1, \virt, #PMD_SHIFT
-	and	\tmp1, \tmp1, #PTRS_PER_PMD - 1	// PMD index
-	orr	\tmp2, \tbl, #3			// PMD entry table type
-	str	\tmp2, [\pud, \tmp1, lsl #3]
-	.endm
-
 /*
  * Macro to populate block entries in the page table for the start..end
  * virtual range (inclusive).
@@ -481,9 +468,6 @@ __create_page_tables:
 	add	x0, x25, #PAGE_SIZE		// section table address
 	adr	x3, __turn_mmu_on		// virtual/physical address
 	create_pgd_entry x25, x0, x3, x5, x6
-	add     x1, x0, #PAGE_SIZE
-	create_page_entry x0, x1, x3, x5, x6
-	mov	x0, x1
 	create_block_map x0, x7, x3, x5, x5, idmap=1
 
 	/*
@@ -492,9 +476,6 @@ __create_page_tables:
 	add	x0, x26, #PAGE_SIZE		// section table address
 	mov	x5, #PAGE_OFFSET
 	create_pgd_entry x26, x0, x5, x3, x6
-	add     x1, x0, #PAGE_SIZE
-	create_page_entry x0, x1, x5, x3, x6
-	mov	x0, x1
 	ldr	x6, =KERNEL_END - 1
 	mov	x3, x24				// phys offset
 	create_block_map x0, x7, x3, x5, x6
@@ -521,14 +502,8 @@ __create_page_tables:
 	 * later based earlyprintk kernel parameter.
 	 */
 	ldr	x5, =EARLYCON_IOBASE		// UART virtual address
-#ifndef CONFIG_ARM64_64K_PAGES
-	add	x0, x26, #PAGE_SIZE
-#else
-	add	x0, x26, #2 * PAGE_SIZE
-#endif
+	add	x0, x26, #2 * PAGE_SIZE		// section table address
 	create_pgd_entry x26, x0, x5, x6, x7
-	add	x1, x0, #2 * PAGE_SIZE
-	create_page_entry x0, x1, x5, x6, x7
 #endif
 	ret
 ENDPROC(__create_page_tables)

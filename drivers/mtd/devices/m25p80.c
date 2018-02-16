@@ -159,11 +159,25 @@ static inline int write_disable(struct m25p *flash)
  */
 static inline int set_4byte(struct m25p *flash, u32 jedec_id, int enable)
 {
+	int status;
+	bool need_wren = false;
+
 	switch (JEDEC_MFR(jedec_id)) {
+	case CFI_MFR_ST: /* Micron, actually */
+		/* Some Micron need WREN command; all will accept it */
+		need_wren = true;
 	case CFI_MFR_MACRONIX:
 	case 0xEF /* winbond */:
+		if (need_wren)
+			write_enable(flash);
+
 		flash->command[0] = enable ? OPCODE_EN4B : OPCODE_EX4B;
-		return spi_write(flash->spi, flash->command, 1);
+		status = spi_write(flash->spi, flash->command, 1);
+
+		if (need_wren)
+			write_disable(flash);
+
+		return status;
 	default:
 		/* Spansion style */
 		flash->command[0] = OPCODE_BRWR;
@@ -761,6 +775,18 @@ static const struct spi_device_id m25p_ids[] = {
 	{ "n25q128a11",  INFO(0x20bb18, 0, 64 * 1024, 256, 0) },
 	{ "n25q128a13",  INFO(0x20ba18, 0, 64 * 1024, 256, 0) },
 	{ "n25q256a", INFO(0x20ba19, 0, 64 * 1024, 512, SECT_4K) },
+	{ "mt25ql064", INFO(0x20ba17, 0, 64 * 1024, 128, SECT_4K) },
+	{ "mt25qu064", INFO(0x20bb17, 0, 64 * 1024, 128, SECT_4K) },
+	{ "mt25ql128", INFO(0x20ba18, 0, 64 * 1024, 256, SECT_4K) },
+	{ "mt25qu128", INFO(0x20bb18, 0, 64 * 1024, 256, SECT_4K) },
+	{ "mt25ql256", INFO(0x20ba19, 0, 64 * 1024, 512, SECT_4K) },
+	{ "mt25qu256", INFO(0x20bb19, 0, 64 * 1024, 512, SECT_4K) },
+	{ "mt25ql512", INFO(0x20ba20, 0, 64 * 1024, 1024, SECT_4K) },
+	{ "mt25qu512", INFO(0x20bb20, 0, 64 * 1024, 1024, SECT_4K) },
+	{ "mt25ql01g", INFO(0x20ba21, 0, 64 * 1024, 2048, SECT_4K) },
+	{ "mt25qu01g", INFO(0x20bb21, 0, 64 * 1024, 2048, SECT_4K) },
+	{ "mt25ql02g", INFO(0x20ba22, 0, 64 * 1024, 4096, SECT_4K) },
+	{ "mt25qu02g", INFO(0x20bb22, 0, 64 * 1024, 4096, SECT_4K) },
 
 	/* Spansion -- single (large) sector size only, at least
 	 * for the chips listed here (without boot sectors).

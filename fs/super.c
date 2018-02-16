@@ -76,6 +76,8 @@ static int prune_super(struct shrinker *shrink, struct shrink_control *sc)
 
 	total_objects = sb->s_nr_dentry_unused +
 			sb->s_nr_inodes_unused + fs_objects + 1;
+	if (!total_objects)
+		total_objects = 1;
 
 	if (sc->nr_to_scan) {
 		int	dentries;
@@ -218,10 +220,6 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags)
 		s->s_shrink.seeks = DEFAULT_SEEKS;
 		s->s_shrink.shrink = prune_super;
 		s->s_shrink.batch = 1024;
-#ifdef CONFIG_BLK_DEV_REMOVE
-		INIT_LIST_HEAD(&s->s_vfsmnt);
-		sema_init(&s->s_vfsmnt_sem, 1);
-#endif
 	}
 out:
 	return s;
@@ -1348,8 +1346,8 @@ int freeze_super(struct super_block *sb)
 		}
 	}
 	/*
-	 * This is just for debugging purposes so that fs can warn if it
-	 * sees write activity when frozen is set to SB_FREEZE_COMPLETE.
+	 * For debugging purposes so that fs can warn if it sees write activity
+	 * when frozen is set to SB_FREEZE_COMPLETE, and for thaw_super().
 	 */
 	sb->s_writers.frozen = SB_FREEZE_COMPLETE;
 	up_write(&sb->s_umount);
@@ -1368,7 +1366,7 @@ int thaw_super(struct super_block *sb)
 	int error;
 
 	down_write(&sb->s_umount);
-	if (sb->s_writers.frozen == SB_UNFROZEN) {
+	if (sb->s_writers.frozen != SB_FREEZE_COMPLETE) {
 		up_write(&sb->s_umount);
 		return -EINVAL;
 	}

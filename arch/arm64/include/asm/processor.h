@@ -28,6 +28,7 @@
 #ifdef __KERNEL__
 
 #include <linux/string.h>
+#include <linux/thread_info.h>
 
 #include <asm/fpsimd.h>
 #include <asm/hw_breakpoint.h>
@@ -38,7 +39,7 @@
 #define STACK_TOP_MAX		TASK_SIZE_64
 #ifdef CONFIG_COMPAT
 #define AARCH32_VECTORS_BASE	0xffff0000
-#define STACK_TOP		(is_compat_task() ? \
+#define STACK_TOP		(test_thread_flag(TIF_32BIT) ? \
 				AARCH32_VECTORS_BASE : STACK_TOP_MAX)
 #else
 #define STACK_TOP		STACK_TOP_MAX
@@ -98,6 +99,29 @@ static inline void start_thread(struct pt_regs *regs, unsigned long pc,
 	regs->pstate = PSR_MODE_EL0t;
 	regs->sp = sp;
 }
+
+#ifdef CONFIG_COMPAT
+static inline void compat_start_thread(struct pt_regs *regs, unsigned long pc,
+				       unsigned long sp)
+{
+#ifdef CONFIG_ARM64_ILP32
+	/*
+	 * ILP32 thread are started the same way as LP64 threads.
+	 * Note we cannot use is_ilp32_compat_task here as that
+	 * would introduce a header depency issue.
+	 */
+	if (!test_thread_flag(TIF_AARCH32)) {
+		start_thread(regs, pc, sp);
+		return;
+	}
+#endif
+	start_thread_common(regs, pc);
+	regs->pstate = COMPAT_PSR_MODE_USR;
+	if (pc & 1)
+		regs->pstate |= COMPAT_PSR_T_BIT;
+	regs->compat_sp = sp;
+}
+#endif
 
 /* Forward declaration, a strange C thing */
 struct task_struct;

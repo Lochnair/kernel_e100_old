@@ -19,6 +19,7 @@
  * Registers
  */
 #define I8042_DATA_REG		0x60
+#define I8042_PORT_B_REG	0x61
 #define I8042_COMMAND_REG	0x64
 
 /*
@@ -294,7 +295,7 @@ static void kbd_reset(void)
 /*
  * Called when the OS has written to one of the keyboard's ports (0x60 or 0x64)
  */
-static bool kbd_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool kbd_in(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	switch (port) {
 	case I8042_COMMAND_REG: {
@@ -307,6 +308,10 @@ static bool kbd_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data,
 		ioport__write32(data, value);
 		break;
 	}
+	case I8042_PORT_B_REG: {
+		ioport__write8(data, 0x20);
+		break;
+	}
 	default:
 		return false;
 	}
@@ -314,17 +319,20 @@ static bool kbd_in(struct ioport *ioport, struct kvm *kvm, u16 port, void *data,
 	return true;
 }
 
-static bool kbd_out(struct ioport *ioport, struct kvm *kvm, u16 port, void *data, int size)
+static bool kbd_out(struct ioport *ioport, struct kvm_cpu *vcpu, u16 port, void *data, int size)
 {
 	switch (port) {
 	case I8042_COMMAND_REG: {
 		u8 value = ioport__read8(data);
-		kbd_write_command(kvm, value);
+		kbd_write_command(vcpu->kvm, value);
 		break;
 	}
 	case I8042_DATA_REG: {
 		u32 value = ioport__read32(data);
 		kbd_write_data(value);
+		break;
+	}
+	case I8042_PORT_B_REG: {
 		break;
 	}
 	default:

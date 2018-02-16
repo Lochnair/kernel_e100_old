@@ -29,13 +29,14 @@ struct nf_queue_handler {
 void nf_register_queue_handler(const struct nf_queue_handler *qh);
 void nf_unregister_queue_handler(void);
 extern void nf_reinject(struct nf_queue_entry *entry, unsigned int verdict);
-
-bool nf_queue_entry_get_refs(struct nf_queue_entry *entry);
-void nf_queue_entry_release_refs(struct nf_queue_entry *entry);
+extern void nf_queue_entry_release_refs(struct nf_queue_entry *entry);
 
 #if defined(CONFIG_IMQ) || defined(CONFIG_IMQ_MODULE)
 extern void nf_register_queue_imq_handler(const struct nf_queue_handler *qh);
 extern void nf_unregister_queue_imq_handler(void);
 #endif
+
+bool nf_queue_entry_get_refs(struct nf_queue_entry *entry);
+void nf_queue_entry_release_refs(struct nf_queue_entry *entry);
 
 #endif /* _NF_QUEUE_H */

@@ -108,6 +108,9 @@ static void vunmap_page_range(unsigned long addr, unsigned long end)
 	pgd_t *pgd;
 	unsigned long next;
 
+#ifdef CONFIG_PAX_SEC_PGD	
+	pgd_t *pgd_pax = pgd_offset_pax(addr);
+#endif
 	BUG_ON(addr >= end);
 	pgd = pgd_offset_k(addr);
 	do {
@@ -115,7 +118,13 @@ static void vunmap_page_range(unsigned long addr, unsigned long end)
 		if (pgd_none_or_clear_bad(pgd))
 			continue;
 		vunmap_pud_range(pgd, addr, next);
+#ifdef CONFIG_PAX_SEC_PGD	
+		*pgd_pax = *pgd;
+	} while (pgd++, pgd_pax++, addr = next, addr != end);
+#else
 	} while (pgd++, addr = next, addr != end);
+#endif
+
 }
 
 static int vmap_pte_range(pmd_t *pmd, unsigned long addr,
@@ -205,6 +214,9 @@ static int vmap_page_range_noflush(unsigned long start, unsigned long end,
 	unsigned long addr = start;
 	int err = 0;
 	int nr = 0;
+#ifdef CONFIG_PAX_SEC_PGD	
+	pgd_t *pgd_pax = pgd_offset_pax(addr);
+#endif
 
 	BUG_ON(addr >= end);
 	pgd = pgd_offset_k(addr);
@@ -213,7 +225,12 @@ static int vmap_page_range_noflush(unsigned long start, unsigned long end,
 		err = vmap_pud_range(pgd, addr, next, prot, pages, &nr);
 		if (err)
 			return err;
+#ifdef CONFIG_PAX_SEC_PGD	
+		*pgd_pax = *pgd;
+	} while (pgd++, pgd_pax++, addr = next, addr != end);
+#else
 	} while (pgd++, addr = next, addr != end);
+#endif
 
 	return nr;
 }
@@ -248,6 +265,7 @@ int is_vmalloc_or_module_addr(const void *x)
 
 	return is_vmalloc_addr(x);
 }
+EXPORT_SYMBOL(is_vmalloc_or_module_addr);
 
 /*
  * Walk a vmap address to the struct page it maps.

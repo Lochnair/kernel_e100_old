@@ -4,7 +4,7 @@
 #include <linux/types.h>
 #include <linux/virtio_mmio.h>
 
-#define VIRTIO_MMIO_MAX_VQ	3
+#define VIRTIO_MMIO_MAX_VQ	32
 #define VIRTIO_MMIO_MAX_CONFIG	1
 #define VIRTIO_MMIO_IO_SIZE	0x200
 
@@ -56,4 +56,5 @@ int virtio_mmio_signal_config(struct kvm *kvm, struct virtio_device *vdev);
 int virtio_mmio_exit(struct kvm *kvm, struct virtio_device *vdev);
 int virtio_mmio_init(struct kvm *kvm, void *dev, struct virtio_device *vdev,
 		      int device_id, int subsys_id, int class);
+void virtio_mmio_assign_irq(struct device_header *dev_hdr);
 #endif

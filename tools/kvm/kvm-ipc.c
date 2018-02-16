@@ -49,18 +49,25 @@ static int kvm__create_socket(struct kvm *kvm)
 	}
 
 	s = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (s < 0)
+	if (s < 0) {
+		perror("socket");
 		return s;
+	}
+
 	local.sun_family = AF_UNIX;
 	strlcpy(local.sun_path, full_name, sizeof(local.sun_path));
 	len = strlen(local.sun_path) + sizeof(local.sun_family);
 	r = bind(s, (struct sockaddr *)&local, len);
-	if (r < 0)
+	if (r < 0) {
+		perror("bind");
 		goto fail;
+	}
 
 	r = listen(s, 5);
-	if (r < 0)
+	if (r < 0) {
+		perror("listen");
 		goto fail;
+	}
 
 	return s;
 
@@ -105,14 +112,38 @@ int kvm__get_sock_by_instance(const char *name)
 	return s;
 }
 
+static bool is_socket(const char *base_path, const struct dirent *dent)
+{
+	switch (dent->d_type) {
+	case DT_SOCK:
+		return true;
+
+	case DT_UNKNOWN: {
+		char path[PATH_MAX];
+		struct stat st;
+
+		sprintf(path, "%s/%s", base_path, dent->d_name);
+		if (stat(path, &st))
+			return false;
+
+		return S_ISSOCK(st.st_mode);
+	}
+	default:
+		return false;
+	}
+}
+
 int kvm__enumerate_instances(int (*callback)(const char *name, int fd))
 {
 	int sock;
 	DIR *dir;
 	struct dirent entry, *result;
 	int ret = 0;
+	const char *path;
 
-	dir = opendir(kvm__get_dir());
+	path = kvm__get_dir();
+
+	dir = opendir(path);
 	if (!dir)
 		return -errno;
 
@@ -120,7 +151,7 @@ int kvm__enumerate_instances(int (*callback)(const char *name, int fd))
 		readdir_r(dir, &entry, &result);
 		if (result == NULL)
 			break;
-		if (entry.d_type == DT_SOCK) {
+		if (is_socket(path, &entry)) {
 			ssize_t name_len = strlen(entry.d_name);
 			char *p;
 
@@ -430,6 +461,7 @@ int kvm_ipc__init(struct kvm *kvm)
 
 	epoll_fd = epoll_create(KVM_IPC_MAX_MSGS);
 	if (epoll_fd < 0) {
+		perror("epoll_create");
 		ret = epoll_fd;
 		goto err;
 	}
@@ -437,13 +469,14 @@ int kvm_ipc__init(struct kvm *kvm)
 	ev.events = EPOLLIN | EPOLLET;
 	ev.data.fd = sock;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &ev) < 0) {
-		pr_err("Failed starting IPC thread");
+		pr_err("Failed adding socket to epoll");
 		ret = -EFAULT;
 		goto err_epoll;
 	}
 
 	stop_fd = eventfd(0, 0);
 	if (stop_fd < 0) {
+		perror("eventfd");
 		ret = stop_fd;
 		goto err_epoll;
 	}

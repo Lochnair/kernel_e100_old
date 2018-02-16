@@ -296,7 +296,7 @@ bool load_bzimage(struct kvm *kvm, int fd_kernel, int fd_initrd,
 
 
 	/* vidmode should be either specified or set by default */
-	if (kvm->cfg.vnc || kvm->cfg.sdl) {
+	if (kvm->cfg.vnc || kvm->cfg.sdl || kvm->cfg.gtk) {
 		if (!kvm->cfg.arch.vidmode)
 			vidmode = 0x312;
 		else
@@ -374,7 +374,7 @@ int kvm__arch_free_firmware(struct kvm *kvm)
 	return 0;
 }
 
-void kvm__arch_periodic_poll(struct kvm *kvm)
+void kvm__arch_read_term(struct kvm *kvm)
 {
 	serial8250__update_consoles(kvm);
 	virtio_console__inject_interrupt(kvm);

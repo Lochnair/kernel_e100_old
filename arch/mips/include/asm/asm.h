@@ -18,6 +18,9 @@
 #define __ASM_ASM_H
 
 #include <asm/sgidefs.h>
+#ifdef __ASSEMBLY__
+#include <asm/dwarf2.h>
+#endif
 
 #ifndef CAT
 #ifdef __STDC__
@@ -53,7 +56,9 @@
 		.align	2;				\
 		.type	symbol, @function;		\
 		.ent	symbol, 0;			\
-symbol:		.frame	sp, 0, ra
+symbol:		.frame	sp, 0, ra;			\
+		CFI_STARTPROC
+
 
 /*
  * NESTED - declare nested routine entry point
@@ -62,13 +67,15 @@ symbol:		.frame	sp, 0, ra
 		.globl	symbol;				\
 		.align	2;				\
 		.type	symbol, @function;		\
-		.ent	symbol, 0;			 \
-symbol:		.frame	sp, framesize, rpc
+		.ent	symbol, 0;			\
+symbol:		.frame	sp, framesize, rpc;		\
+		CFI_STARTPROC
 
 /*
  * END - mark end of function
  */
 #define END(function)					\
+		CFI_ENDPROC;				\
 		.end	function;			\
 		.size	function, .-function
 

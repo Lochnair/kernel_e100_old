@@ -98,7 +98,7 @@ static int init_vq(struct kvm *kvm, void *dev, u32 vq, u32 page_size, u32 align,
 
 	queue		= &rdev->vqs[vq];
 	queue->pfn	= pfn;
-	p		= guest_flat_to_host(kvm, queue->pfn * page_size);
+	p		= virtio_get_vq(kvm, queue->pfn, page_size);
 
 	job = &rdev->jobs[vq];
 
@@ -171,7 +171,7 @@ int virtio_rng__init(struct kvm *kvm)
 	}
 
 	r = virtio_init(kvm, rdev, &rdev->vdev, &rng_dev_virtio_ops,
-			VIRTIO_DEFAULT_TRANS, PCI_DEVICE_ID_VIRTIO_RNG,
+			VIRTIO_DEFAULT_TRANS(kvm), PCI_DEVICE_ID_VIRTIO_RNG,
 			VIRTIO_ID_RNG, PCI_CLASS_RNG);
 	if (r < 0)
 		goto cleanup;

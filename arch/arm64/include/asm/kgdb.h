@@ -1,34 +1,35 @@
 /*
- * Aarch64 KGDB support
+ * AArch64 KGDB support
  *
- * Most of the contents are extracted from 
- * arch/arm/include/kgdb.h
+ * Based on arch/arm/include/kgdb.h
  *
  * Copyright (C) 2013 Cavium Inc.
- *
  * Author: Vijaya Kumar K <vijaya.kumar@caviumnetworks.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __ARM_KGDB_H__
-#define __ARM_KGDB_H__
+#ifndef __ARM_KGDB_H
+#define __ARM_KGDB_H
 
 #include <linux/ptrace.h>
-
-/*
- * Break Instruction encoding
- */
-
-#define BREAK_INSTR_SIZE		4
-#define KGDB_BREAKINST_ESR_VAL		0xf2000000
-#define KGDB_COMPILED_BREAK_ESR_VAL	0xf2000001
-#define CACHE_FLUSH_IS_SAFE		1
-#define ARM64_KGDB_COMPILE_BRK_IMM      1
+#include <asm/debug-monitors.h>
 
 #ifndef	__ASSEMBLY__
 
 static inline void arch_kgdb_breakpoint(void)
 {
-	asm ("brk %0" :: "I" (ARM64_KGDB_COMPILE_BRK_IMM));
+	asm ("brk %0" : : "I" (KDBG_COMPILED_DBG_BRK_IMM));
 }
 
 extern void kgdb_handle_bus_error(void);
@@ -39,20 +40,45 @@ extern int kgdb_fault_expected;
 /*
  * gdb is expecting the following registers layout.
  *
- * r0-r31: 64bit each
- * f0-f31: unused
- * fps:    unused
+ * General purpose regs:
+ *     r0-r30: 64 bit
+ *     sp,pc : 64 bit
+ *     pstate  : 64 bit
+ *     Total: 34
+ * FPU regs:
+ *     f0-f31: 128 bit
+ *     Total: 32
+ * Extra regs
+ *     fpsr & fpcr: 32 bit
+ *     Total: 2
  *
  */
 
 #define _GP_REGS		34
 #define _FP_REGS		32
 #define _EXTRA_REGS		2
-#define GDB_MAX_REGS		(_GP_REGS + (_FP_REGS * 3) + _EXTRA_REGS)
+/*
+ * general purpose registers size in bytes.
+ * pstate is only 4 bytes. subtract 4 bytes
+ */
+#define GP_REG_BYTES		(_GP_REGS * 8)
 #define DBG_MAX_REG_NUM		(_GP_REGS + _FP_REGS + _EXTRA_REGS)
 
-#define KGDB_MAX_NO_CPUS	1
-#define BUFMAX			400
-#define NUMREGBYTES		(DBG_MAX_REG_NUM << 2)
+/*
+ * Size of I/O buffer for gdb packet.
+ * considering to hold all register contents, size is set
+ */
 
-#endif /* __ASM_KGDB_H__ */
+#define BUFMAX			2048
+
+/*
+ * Number of bytes required for gdb_regs buffer.
+ * _GP_REGS: 8 bytes, _FP_REGS: 16 bytes and _EXTRA_REGS: 4 bytes each
+ * GDB fails to connect for size beyond this with error
+ * "'g' packet reply is too long"
+ */
+
+#define NUMREGBYTES	((_GP_REGS * 8) + (_FP_REGS * 16) + \
+			(_EXTRA_REGS * 4))
+
+#endif /* __ASM_KGDB_H */

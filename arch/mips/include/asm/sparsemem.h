@@ -12,7 +12,7 @@
 # define SECTION_SIZE_BITS	28
 #endif
 
-#define MAX_PHYSMEM_BITS        38
+#include <physmem.h>
 
 #endif /* CONFIG_SPARSEMEM */
 #endif /* _MIPS_SPARSEMEM_H */

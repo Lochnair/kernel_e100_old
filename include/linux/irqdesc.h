@@ -12,6 +12,8 @@ struct irq_affinity_notify;
 struct proc_dir_entry;
 struct module;
 struct irq_desc;
+struct irq_domain;
+struct pt_regs;
 
 /**
  * struct irq_desc - interrupt descriptor
@@ -27,6 +29,8 @@ struct irq_desc;
  * @irq_count:		stats field to detect stalled irqs
  * @last_unhandled:	aging timer for unhandled count
  * @irqs_unhandled:	stats field for spurious unhandled interrupts
+ * @threads_handled:	stats field for deferred spurious detection of threaded handlers
+ * @threads_handled_last: comparator field for deferred spurious detection of theraded handlers
  * @lock:		locking for SMP
  * @affinity_hint:	hint to user space for preferred irq affinity
  * @affinity_notify:	context for notification of affinity changes
@@ -52,6 +56,8 @@ struct irq_desc {
 	unsigned int		irq_count;	/* For detecting broken IRQs */
 	unsigned long		last_unhandled;	/* Aging timer for unhandled count */
 	unsigned int		irqs_unhandled;
+	atomic_t		threads_handled;
+	int			threads_handled_last;
 	u64			random_ip;
 	raw_spinlock_t		lock;
 	struct cpumask		*percpu_enabled;
@@ -116,6 +122,23 @@ static inline void generic_handle_irq_desc(unsigned int irq, struct irq_desc *de
 }
 
 int generic_handle_irq(unsigned int irq);
+
+#ifdef CONFIG_HANDLE_DOMAIN_IRQ
+/*
+ * Convert a HW interrupt number to a logical one using a IRQ domain,
+ * and handle the result interrupt number. Return -EINVAL if
+ * conversion failed. Providing a NULL domain indicates that the
+ * conversion has already been done.
+ */
+int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
+			bool lookup, struct pt_regs *regs);
+
+static inline int handle_domain_irq(struct irq_domain *domain,
+				    unsigned int hwirq, struct pt_regs *regs)
+{
+	return __handle_domain_irq(domain, hwirq, true, regs);
+}
+#endif
 
 /* Test to see if a driver has successfully requested an irq */
 static inline int irq_has_action(unsigned int irq)

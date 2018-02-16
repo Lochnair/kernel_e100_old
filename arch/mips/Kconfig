@@ -766,7 +766,13 @@ config CAVIUM_OCTEON_SOC
 	select HAVE_KVM
 	select ARCH_SPARSEMEM_ENABLE
 	select SYS_SUPPORTS_SMP
-	select NR_CPUS_DEFAULT_32
+	select NR_CPUS_DEFAULT_64
+	select MIPS_NR_CPU_NR_MAP_1024
+	select SYS_SUPPORTS_NUMA if SMP
+	select SPARSE_IRQ if NUMA
+	select HANDLE_DOMAIN_IRQ
+	select USB_ARCH_HAS_XHCI
+	select CAVIUM_ERET_MISPREDICT_WORKAROUND if KVM_MIPS_VZ
 	help
 	  This option supports all of the Octeon SoCs and reference
 	  boards from Cavium, Inc. The Cavium Octeon processor is a
@@ -849,6 +855,7 @@ config MIPS_PARAVIRT
 	select SYS_HAS_CPU_CAVIUM_OCTEON
 	select HW_HAS_PCI
 	select SWAP_IO_SPACE
+	select ARCH_SUPPORTS_MSI
 	help
 	  This option supports guest running under ????
 
@@ -2187,6 +2194,7 @@ config SYS_SUPPORTS_NUMA
 
 config NODES_SHIFT
 	int
+	default "1" if CAVIUM_OCTEON_SOC
 	default "6"
 	depends on NEED_MULTIPLE_NODES
 
@@ -2278,6 +2286,14 @@ config NR_CPUS
 
 config MIPS_PERF_SHARED_TC_COUNTERS
 	bool
+
+config  MIPS_NR_CPU_NR_MAP_1024
+	bool
+
+config MIPS_NR_CPU_NR_MAP
+	int
+	default 1024 if MIPS_NR_CPU_NR_MAP_1024
+	default NR_CPUS if !MIPS_NR_CPU_NR_MAP_1024
 
 #
 # Timer Interrupt Frequency Configuration

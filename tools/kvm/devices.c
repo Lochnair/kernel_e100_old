@@ -1,5 +1,7 @@
 #include "kvm/devices.h"
 #include "kvm/kvm.h"
+#include "kvm/pci.h"
+#include "kvm/virtio-mmio.h"
 
 #include <linux/err.h>
 #include <linux/rbtree.h>
@@ -27,6 +29,17 @@ int device__register(struct device_header *dev)
 	bus = &device_trees[dev->bus_type];
 	dev->dev_num = bus->dev_num++;
 
+	switch (dev->bus_type) {
+	case DEVICE_BUS_PCI:
+		pci__assign_irq(dev);
+		break;
+	case DEVICE_BUS_MMIO:
+		virtio_mmio_assign_irq(dev);
+		break;
+	default:
+		break;
+	}
+
 	node = &bus->root.rb_node;
 	while (*node) {
 		int num = rb_entry(*node, struct device_header, node)->dev_num;
@@ -43,6 +56,12 @@ int device__register(struct device_header *dev)
 	rb_link_node(&dev->node, parent, node);
 	rb_insert_color(&dev->node, &bus->root);
 	return 0;
+}
+
+void device__unregister(struct device_header *dev)
+{
+	struct device_bus *bus = &device_trees[dev->bus_type];
+	rb_erase(&dev->node, &bus->root);
 }
 
 struct device_header *device__find_dev(enum device_bus_type bus_type, u8 dev_num)

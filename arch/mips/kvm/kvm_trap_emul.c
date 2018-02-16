@@ -16,6 +16,8 @@
 
 #include <linux/kvm_host.h>
 
+#include <asm/fpu.h>
+
 #include <asm/kvm_mips_te.h>
 
 #include "kvm_mips_opcode.h"
@@ -312,11 +314,13 @@ static int kvm_mips_te_vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 		vcpu->mmio_needed = 0;
 	}
 
+	lose_fpu(1);
+
+	local_irq_disable();
 	/* Check if we have any exceptions/interrupts pending */
 	kvm_mips_deliver_interrupts(vcpu,
 				    kvm_read_c0_guest_cause(vcpu_te->cop0));
 
-	local_irq_disable();
 	kvm_guest_enter();
 
 	r = __kvm_mips_vcpu_run(run, vcpu);

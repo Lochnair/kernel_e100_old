@@ -14,6 +14,7 @@
 #define _ASM_MIPSREGS_H
 
 #include <linux/linkage.h>
+#include <linux/types.h>
 #include <asm/hazards.h>
 #include <asm/war.h>
 
@@ -61,6 +62,7 @@
 #define CP0_CAUSE $13
 #define CP0_EPC $14
 #define CP0_PRID $15
+#define CP0_EBASE $15, 1
 #define CP0_CONFIG $16
 #define CP0_LLADDR $17
 #define CP0_WATCHLO $18
@@ -637,15 +639,15 @@
  * thread pointer from userspace. Octeon uses a 64bit location in
  * CVMSEG to store the thread pointer for quick access.
  *
- * TLB refill uses location -16 (and below), fast access is -8 (both
- * from the top of the area.
+ * We use the second CVMSEG line.  TLB refill uses location -16 (and
+ * below), fast access is -8 (both from the top of the area).
  */
 #ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
-#define FAST_ACCESS_THREAD_OFFSET			\
-	(CONFIG_CAVIUM_OCTEON_CVMSEG_SIZE * 128 - 8 - 32768)
+#define FAST_ACCESS_THREAD_OFFSET (2 * 128 - 8 - 32768)
 #define FAST_ACCESS_THREAD_REGISTER			\
 	(*(unsigned long *)(FAST_ACCESS_THREAD_OFFSET))
 #endif
+#define CAVIUM_OCTEON_SCRATCH_OFFSET (2 * 128 - 16 - 32768)
 
 #ifndef __ASSEMBLY__
 
@@ -2096,77 +2098,7 @@ __BUILD_SET_C0(brcm_mode)
 
 int allocate_kscratch(void);
 
-static inline unsigned long hypcall0(unsigned long num)
-{
-	register unsigned long n asm("v0");
-	register unsigned long r asm("v0");
-
-	n = num;
-	__asm__ __volatile__(
-		".word 0x42000028"	/* HYPCALL */
-		: "=r" (r) : "r" (n) : "memory"
-		);
-
-	return r;
-}
-
-static inline unsigned long hypcall1(unsigned long num, unsigned long arg0)
-{
-	register unsigned long n asm("v0");
-	register unsigned long r asm("v0");
-	register unsigned long a0 asm("a0");
-
-	n = num;
-	a0 = arg0;
-	__asm__ __volatile__(
-		".word 0x42000028"	/* HYPCALL */
-		: "=r" (r) : "r" (n), "r" (a0) : "memory"
-		);
-
-	return r;
-}
-
-static inline unsigned long hypcall2(unsigned long num, unsigned long arg0,
-				     unsigned long arg1)
-{
-	register unsigned long n asm("v0");
-	register unsigned long r asm("v0");
-	register unsigned long a0 asm("a0");
-	register unsigned long a1 asm("a1");
-
-	n = num;
-	a0 = arg0;
-	a1 = arg1;
-	__asm__ __volatile__(
-		".word 0x42000028"	/* HYPCALL */
-		: "=r" (r) : "r" (n), "r" (a0), "r" (a1) : "memory"
-		);
-
-	return r;
-}
-
-static inline unsigned long hypcall3(unsigned long num, unsigned long arg0,
-				     unsigned long arg1, unsigned long arg2)
-{
-	register unsigned long n asm("v0");
-	register unsigned long r asm("v0");
-	register unsigned long a0 asm("a0");
-	register unsigned long a1 asm("a1");
-	register unsigned long a2 asm("a2");
-
-	n = num;
-	a0 = arg0;
-	a1 = arg1;
-	a2 = arg2;
-	__asm__ __volatile__(
-		".word 0x42000028"	/* HYPCALL */
-		: "=r" (r) : "r" (n), "r" (a0), "r" (a1), "r" (a2) : "memory"
-		);
-
-	return r;
-}
-
-static inline unsigned int mips_cpunum(void)
+static inline unsigned int get_ebase_cpunum(void)
 {
 	return read_c0_ebase() & 0x3ff; /* Low 10 bits of ebase. */
 }

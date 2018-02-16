@@ -30,7 +30,7 @@
 #include <linux/slab.h>
 
 #include <asm/octeon/octeon.h>
-#include <asm/octeon/cvmx-fpa.h>
+#include <asm/octeon/cvmx-fpa1.h>
 
 #include "ethernet-defines.h"
 #include "octeon-ethernet.h"
@@ -46,9 +46,8 @@ struct fpa_pool {
 };
 
 static DEFINE_MUTEX(cvm_oct_pools_lock);
-/* Eight pools. */
-static struct fpa_pool cvm_oct_pools[] = {
-	{-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}, {-1}
+static struct fpa_pool cvm_oct_pools[CVMX_FPA1_NUM_POOLS] = {
+	[0 ... CVMX_FPA1_NUM_POOLS - 1] = {-1,},
 };
 
 /**
@@ -78,7 +77,7 @@ static int cvm_oct_fill_hw_skbuff(struct fpa_pool *pool, int elements)
 		extra_reserve = desired_data - skb->data;
 		skb_reserve(skb, extra_reserve);
 		*(struct sk_buff **)(skb->data - sizeof(void *)) = skb;
-		cvmx_fpa_free(skb->data, pool_num, DONT_WRITEBACK(size / 128));
+		cvmx_fpa1_free(skb->data, pool_num, DONT_WRITEBACK(size / 128));
 		freed--;
 	}
 	return elements - freed;
@@ -97,12 +96,14 @@ static int cvm_oct_free_hw_skbuff(struct fpa_pool *pool, int elements)
 	int pool_num = pool->pool;
 
 	while (elements) {
-		memory = cvmx_fpa_alloc(pool_num);
+		memory = cvmx_fpa1_alloc(pool_num);
 		if (!memory)
 			break;
-		skb = *cvm_oct_packet_to_skb(memory);
-		elements--;
-		dev_kfree_skb(skb);
+		if (elements > 0) {
+			skb = *cvm_oct_packet_to_skb(memory);
+			elements--;
+			dev_kfree_skb(skb);
+		}
 	}
 
 	if (elements > 0)
@@ -132,7 +133,7 @@ static int cvm_oct_fill_hw_kmem(struct fpa_pool *pool, int elements)
 			       elements * pool->size, pool->pool);
 			break;
 		}
-		cvmx_fpa_free(memory, pool->pool, 0);
+		cvmx_fpa1_free(memory, pool->pool, 0);
 		freed--;
 	}
 	return elements - freed;
@@ -148,11 +149,13 @@ static int cvm_oct_free_hw_kmem(struct fpa_pool *pool, int elements)
 {
 	char *fpa;
 	while (elements) {
-		fpa = cvmx_fpa_alloc(pool->pool);
+		fpa = cvmx_fpa1_alloc(pool->pool);
 		if (!fpa)
 			break;
-		elements--;
-		kmem_cache_free(pool->kmem, fpa);
+		if (elements > 0) {
+			elements--;
+			kmem_cache_free(pool->kmem, fpa);
+		}
 	}
 
 	if (elements > 0)
@@ -217,6 +220,8 @@ int cvm_oct_alloc_fpa_pool(int pool, int size)
 	if (pool >= (int)ARRAY_SIZE(cvm_oct_pools) || size < 128)
 		return -EINVAL;
 
+	BUG_ON(octeon_has_feature(OCTEON_FEATURE_FPA3));
+
 	mutex_lock(&cvm_oct_pools_lock);
 
 	if (pool >= 0) {
@@ -233,7 +238,7 @@ int cvm_oct_alloc_fpa_pool(int pool, int size)
 			}
 		}
 		/* reserve/alloc fpa pool */
-		pool = cvmx_fpa_alloc_pool(pool);
+		pool = cvmx_fpa1_reserve_pool(pool);
 		if (pool < 0) {
 			ret = -EINVAL;
 			goto out;
@@ -249,7 +254,7 @@ int cvm_oct_alloc_fpa_pool(int pool, int size)
 			}
 
 		/* Alloc fpa pool */
-		pool = cvmx_fpa_alloc_pool(pool);
+		pool = cvmx_fpa1_reserve_pool(pool);
 		if (pool < 0) {
 			/* No empties. */
 			ret = -EINVAL;
@@ -277,7 +282,7 @@ int cvm_oct_alloc_fpa_pool(int pool, int size)
 		if (!cvm_oct_pools[pool].kmem) {
 			ret = -ENOMEM;
 			cvm_oct_pools[pool].pool = -1;
-			cvmx_fpa_release_pool(pool);
+			cvmx_fpa1_release_pool(pool);
 			goto out;
 		}
 	}
@@ -312,7 +317,7 @@ int cvm_oct_release_fpa_pool(int pool)
 	cvm_oct_pools[pool].users--;
 
 	if (cvm_oct_pools[pool].users == 0)
-		cvmx_fpa_release_pool(pool);
+		cvmx_fpa1_release_pool(pool);
 
 	ret = 0;
 out:

@@ -341,7 +341,7 @@ static void __cpuinit link_cache_lists(struct cache *smaller,
 static struct cache *__cpuinit cache_chain_instantiate(unsigned int cpu_id)
 {
 	struct cache *l2_cache = NULL, *l1i_cache = NULL, *l1d_cache = NULL;
-	unsigned int l1i_size, l1d_size;
+	unsigned int l1i_size = 0, l1d_size = 0;
 
 	pr_debug("creating cache object(s) for CPU %i\n", cpu_id);
 

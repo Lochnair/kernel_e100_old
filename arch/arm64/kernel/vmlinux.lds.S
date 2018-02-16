@@ -9,6 +9,10 @@
 #include <asm/memory.h>
 #include <asm/page.h>
 
+#ifdef CONFIG_PAX_KERNEXEC
+#include <asm/pgtable-hwdef.h>
+#endif
+
 #ifdef CONFIG_PAX_REFCOUNT
 /*
  * If we don't keep the .exit.text around, references from __ex_table
@@ -48,6 +52,10 @@ SECTIONS
 		_text = .;
 		HEAD_TEXT
 	}
+
+#ifdef CONFIG_PAX_KERNEXEC
+	. = ALIGN(1<<SECTION_SHIFT);
+#endif
 	.text : {			/* Real text segment		*/
 		_stext = .;		/* Text and read-only data	*/
 			__exception_text_start = .;
@@ -67,6 +75,9 @@ SECTIONS
 	EXCEPTION_TABLE(8)
 	_etext = .;			/* End of text and rodata section */
 
+#ifdef CONFIG_PAX_KERNEXEC
+	. = ALIGN(1<<SECTION_SHIFT);
+#endif
 	. = ALIGN(PAGE_SIZE);
 	__init_begin = .;
 
@@ -90,6 +101,10 @@ SECTIONS
 	PERCPU_SECTION(64)
 
 	__init_end = .;
+
+#ifdef CONFIG_PAX_KERNEXEC
+	. = ALIGN(1<<SECTION_SHIFT);
+#endif
 	. = ALIGN(THREAD_SIZE);
 	__data_loc = .;
 

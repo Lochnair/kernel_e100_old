@@ -14,6 +14,7 @@
 #include <linux/proc_fs.h>
 #include <asm/octeon/octeon.h>
 #include <asm/octeon/cvmx-core.h>
+#include <asm/octeon/cvmx-fpa-defs.h>
 #include <asm/octeon/cvmx-l2c.h>
 #include <asm/octeon/cvmx-l2c-defs.h>
 #include <asm/octeon/cvmx-lmcx-defs.h>
@@ -325,7 +326,10 @@ static void proc_perf_setup(void)
 		for (tad = 0; tad < CVMX_L2C_TADS; tad++)
 			cvmx_write_csr(CVMX_L2C_TADX_PRF(tad), l2c_tadx_prf.u64);
 
-		start_cycle = cvmx_read_csr(CVMX_IPD_CLK_COUNT);
+		if (octeon_has_feature(OCTEON_FEATURE_FPA3))
+			start_cycle = cvmx_read_csr(CVMX_FPA_CLK_COUNT);
+		else
+			start_cycle = cvmx_read_csr(CVMX_IPD_CLK_COUNT);
 	}
 }
 
@@ -372,7 +376,10 @@ static void proc_perf_update(void)
 				cvmx_write_csr(CVMX_L2C_TADX_PFC3(tad), 0);
 			}
 		}
-		end_cycle = cvmx_read_csr(CVMX_IPD_CLK_COUNT);
+		if (octeon_has_feature(OCTEON_FEATURE_FPA3))
+			end_cycle = cvmx_read_csr(CVMX_FPA_CLK_COUNT);
+		else
+			end_cycle = cvmx_read_csr(CVMX_IPD_CLK_COUNT);
 	}
 }
 
@@ -565,9 +572,6 @@ static const struct file_operations proc_perf_operations = {
  */
 static int __init proc_perf_init(void)
 {
-	if (OCTEON_IS_MODEL(OCTEON_CN78XX))
-		return 0;
-
 	pr_notice("/proc/octeon_perf: Octeon performance counter interface loaded\n");
 
 	proc_perf_label[CVMX_CORE_PERF_NONE] = "none";

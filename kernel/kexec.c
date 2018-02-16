@@ -47,6 +47,9 @@ u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
 size_t vmcoreinfo_size;
 size_t vmcoreinfo_max_size = sizeof(vmcoreinfo_data);
 
+/* Flag to indicate we are going to kexec a new kernel */
+bool kexec_in_progress = false;
+
 /* Location of the reserved area for the crash kernel */
 struct resource crashk_res = {
 	.name  = "Crash kernel",
@@ -60,6 +63,29 @@ struct resource crashk_low_res = {
 	.end   = 0,
 	.flags = IORESOURCE_BUSY | IORESOURCE_MEM
 };
+
+static RAW_NOTIFIER_HEAD(kexec_crash_notifier_list);
+static DEFINE_MUTEX(crash_notifier_mutex);
+
+int register_kexec_crash_notifier(struct notifier_block *nb)
+{
+	int ret;
+	mutex_lock(&crash_notifier_mutex);
+	ret = raw_notifier_chain_register(&kexec_crash_notifier_list, nb);
+	mutex_unlock(&crash_notifier_mutex);
+	return ret;
+}
+EXPORT_SYMBOL(register_kexec_crash_notifier);
+
+int unregister_kexec_crash_notifier(struct notifier_block *nb)
+{
+	int ret;
+	mutex_lock(&crash_notifier_mutex);
+	ret = raw_notifier_chain_unregister(&kexec_crash_notifier_list, nb);
+	mutex_unlock(&crash_notifier_mutex);
+	return ret;
+}
+EXPORT_SYMBOL(unregister_kexec_crash_notifier);
 
 int kexec_should_crash(struct task_struct *p)
 {
@@ -1090,6 +1116,8 @@ void crash_kexec(struct pt_regs *regs)
 
 			crash_setup_regs(&fixed_regs, regs);
 			crash_save_vmcoreinfo();
+			raw_notifier_call_chain(&kexec_crash_notifier_list,
+						0, NULL);
 			machine_crash_shutdown(&fixed_regs);
 			machine_kexec(kexec_crash_image);
 		}
@@ -1559,8 +1587,18 @@ unsigned long __attribute__ ((weak)) paddr_vmcoreinfo_note(void)
 	return __pa((unsigned long)(char *)&vmcoreinfo_note);
 }
 
+static int
+save_ram_range(unsigned long start, unsigned long size, void *dummy)
+{
+	VMCOREINFO_MEMRANGE(sysram, ((unsigned long long) start) << PAGE_SHIFT,
+			    ((unsigned long long) size) << PAGE_SHIFT);
+	return 0;
+}
+
 static int __init crash_save_vmcoreinfo_init(void)
 {
+	unsigned long phys_pgd_ptr;
+
 	VMCOREINFO_OSRELEASE(init_uts_ns.name.release);
 	VMCOREINFO_PAGESIZE(PAGE_SIZE);
 
@@ -1622,6 +1660,9 @@ static int __init crash_save_vmcoreinfo_init(void)
 	VMCOREINFO_NUMBER(PG_hwpoison);
 #endif
 	VMCOREINFO_NUMBER(PAGE_BUDDY_MAPCOUNT_VALUE);
+	phys_pgd_ptr = virt_to_phys(init_mm.pgd);
+	VMCOREINFO_ADDRESS(phys_pgd_ptr);
+	walk_system_ram_range(0, -1ULL, NULL, save_ram_range);
 
 	arch_crash_save_vmcoreinfo();
 	update_vmcoreinfo_note();
@@ -1679,7 +1720,17 @@ int kernel_kexec(void)
 	} else
 #endif
 	{
+		kexec_in_progress = true;
 		kernel_restart_prepare(NULL);
+		migrate_to_reboot_cpu();
+
+		/*
+		 * migrate_to_reboot_cpu() disables CPU hotplug assuming that
+		 * no further code needs to use CPU hotplug (which is true in
+		 * the reboot case). However, the kexec path depends on using
+		 * CPU hotplug again; so re-enable it here.
+		 */
+		cpu_hotplug_enable();
 		printk(KERN_EMERG "Starting new kernel\n");
 		machine_shutdown();
 	}

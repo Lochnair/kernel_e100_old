@@ -51,15 +51,19 @@ static int octeon_setup_debug_uart(void)
 	unsigned int hwirq;
 	int irq;
 
-	if (OCTEON_IS_MODEL(OCTEON_CN68XX))
+	if (octeon_has_feature(OCTEON_FEATURE_CIU3))
+		hwirq = 0x8000 + (0x40 * OCTEON_DEBUG_UART);
+	else if (OCTEON_IS_MODEL(OCTEON_CN68XX))
 		hwirq = (3 << 6) + 36 + OCTEON_DEBUG_UART;
 	else
 		hwirq = 34 + OCTEON_DEBUG_UART;
 
+	/* explicit irq, don't rely on device-tree */
 	irq = irq_create_mapping(NULL, hwirq);
 	if (!irq)
 		return -EINVAL;
 
+	irq_set_irq_type(irq, IRQ_TYPE_LEVEL_HIGH);
 
 	if (request_irq(irq, interrupt_debug_char,
 			0, "cvmx-debug", interrupt_debug_char)) {

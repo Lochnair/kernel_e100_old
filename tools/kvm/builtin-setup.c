@@ -126,7 +126,6 @@ static const char *guestfs_symlinks[] = {
 
 static int copy_init(const char *guestfs_name)
 {
-#ifndef CONFIG_MIPS
 	char path[PATH_MAX];
 	size_t size;
 	int fd, ret;
@@ -143,9 +142,10 @@ static int copy_init(const char *guestfs_name)
 	if (ret < 0)
 		die("Fail to setup %s", path);
 	close(fd);
-#endif
+
 	return 0;
 }
+
 static int copy_passwd(const char *guestfs_name)
 {
 	char path[PATH_MAX];

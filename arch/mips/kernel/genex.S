@@ -46,11 +46,6 @@
 NESTED(except_vec3_generic, 0, sp)
 	.set	push
 	.set	noat
-#ifdef CONFIG_KVM_MIPS_VZ
-		/* With KVM_MIPS_VZ, we must not clobber k0/k1 */
-	MTC0	k0, CP0_KSCRATCH1
-	MTC0	k1, CP0_KSCRATCH2
-#endif
 #if R5432_CP0_INTERRUPT_WAR
 	mfc0	k0, CP0_INDEX
 #endif
@@ -170,6 +165,7 @@ LEAF(__r4k_wait)
 	.align	5
 BUILD_ROLLBACK_PROLOGUE handle_int
 NESTED(handle_int, PT_SIZE, sp)
+	CFI_SIGNAL_FRAME
 #ifdef CONFIG_TRACE_IRQFLAGS
 	/*
 	 * Check to see if the interrupted code has just disabled
@@ -196,6 +192,17 @@ NESTED(handle_int, PT_SIZE, sp)
 	and	k0, ST0_IE
 	bnez	k0, 1f
 
+	/* Octeon core-16419 errata. */
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+
 #ifdef CONFIG_FAST_ACCESS_TO_THREAD_POINTER
 	LONG_L	k0, FAST_ACCESS_THREAD_OFFSET($0)
 #endif
@@ -204,18 +211,18 @@ NESTED(handle_int, PT_SIZE, sp)
 1:
 	.set pop
 #endif
-	SAVE_ALL
+	SAVE_ALL docfi=1
 	CLI
 	TRACE_IRQS_OFF
 
 	LONG_L	s0, TI_REGS($28)
 	LONG_S	sp, TI_REGS($28)
-	PTR_LA	ra, ret_from_irq
 	PTR_LA  v0, plat_irq_dispatch
-	jr	v0
+	jal	v0
 #ifdef CONFIG_CPU_MICROMIPS
 	nop
 #endif
+	j	ret_from_irq
 	END(handle_int)
 
 	__INIT
@@ -255,8 +262,8 @@ NESTED(except_vec_ejtag_debug, 0, sp)
  */
 BUILD_ROLLBACK_PROLOGUE except_vec_vi
 NESTED(except_vec_vi, 0, sp)
-	SAVE_SOME
-	SAVE_AT
+	SAVE_SOME docfi=1
+	SAVE_AT docfi=1
 	.set	push
 	.set	noreorder
 #ifdef CONFIG_MIPS_MT_SMTC
@@ -321,8 +328,8 @@ NESTED(except_vec_vi_handler, 0, sp)
 
 	LONG_L	s0, TI_REGS($28)
 	LONG_S	sp, TI_REGS($28)
-	PTR_LA	ra, ret_from_irq
-	jr	v0
+	jal	v0
+	j	ret_from_irq
 	END(except_vec_vi_handler)
 
 /*
@@ -380,6 +387,7 @@ NESTED(except_vec_nmi, 0, sp)
 	__FINIT
 
 NESTED(nmi_handler, PT_SIZE, sp)
+	CFI_SIGNAL_FRAME
 	.set	push
 	.set	noat
 	SAVE_ALL
@@ -467,6 +475,7 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	.macro	__BUILD_HANDLER exception handler clear verbose ext
 	.align	5
 	NESTED(handle_\exception, PT_SIZE, sp)
+	CFI_SIGNAL_FRAME
 	.set	noat
 	SAVE_ALL
 	FEXPORT(handle_\exception\ext)
@@ -474,8 +483,8 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	.set	at
 	__BUILD_\verbose \exception
 	move	a0, sp
-	PTR_LA	ra, ret_from_exception
-	j	do_\handler
+	jal	do_\handler
+	j	ret_from_exception
 	END(handle_\exception)
 	.endm
 
@@ -506,9 +515,6 @@ NESTED(nmi_handler, PT_SIZE, sp)
 	BUILD_HANDLER mcheck mcheck mce verbose		/* #24 */
 	BUILD_HANDLER mt mt sti silent			/* #25 */
 	BUILD_HANDLER dsp dsp sti silent		/* #26 */
-#ifdef CONFIG_KVM_MIPS_VZ
-	BUILD_HANDLER hypervisor hypervisor cli silent	/* #27 */
-#endif
 	BUILD_HANDLER reserved reserved sti verbose	/* others */
 
 	.align	5

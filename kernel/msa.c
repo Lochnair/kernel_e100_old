@@ -548,7 +548,7 @@ void msa_irq_exit(int irq_id, int is_going_to_user)
 	irq_exit();
 
 	if (!nested) {
-		msa_time_t before;
+		msa_time_t before = now;
 		u64 *cpustat = kcpustat_this_cpu->cpustat;
 
 		cpustat[CPUTIME_IRQ] += msa_to_cputime64(delta);
@@ -694,9 +694,7 @@ SYSCALL_DEFINE3(msa, int, ntimers, int, which, msa_time_t __user *, timers)
 	case MSA_GET_NOW:
 		ntimers = 1;
 		tp = out.timers;
-		preempt_disable();
 		MSA_NOW(*tp);
-		preempt_enable();
 		break;
 
 	default:
@@ -745,9 +743,7 @@ static int msa_irq_time_seq_show(struct seq_file *f, void *v)
 	if (i == 0) {
 		msa_time_t now;
 		char cpuname[10];
-		preempt_disable();
 		MSA_NOW(now);
-		preempt_enable();
 		seq_printf(f, "Now: %15llu\n", now);
 		seq_printf(f, "     ");
 		for_each_present_cpu(cpu) {

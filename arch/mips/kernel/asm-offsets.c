@@ -72,10 +72,6 @@ void output_ptreg_defines(void)
 	OFFSET(PT_MPL, pt_regs, mpl);
 	OFFSET(PT_MTP, pt_regs, mtp);
 #endif /* CONFIG_CPU_CAVIUM_OCTEON */
-#ifdef CONFIG_KVM_MIPS_VZ
-	OFFSET(PT_BADINSTR, pt_regs, cp0_badinstr);
-	OFFSET(PT_BADINSTRP, pt_regs, cp0_badinstrp);
-#endif
 	DEFINE(PT_SIZE, sizeof(struct pt_regs));
 	BLANK();
 }
@@ -133,11 +129,6 @@ void output_thread_defines(void)
 	       thread.cp0_baduaddr);
 	OFFSET(THREAD_ECODE, task_struct, \
 	       thread.error_code);
-#ifdef CONFIG_KVM_MIPS_VZ
-	OFFSET(THREAD_VCPU, task_struct, thread.vcpu);
-	OFFSET(THREAD_MM_ASID, task_struct, thread.mm_asid);
-	OFFSET(THREAD_GUEST_ASID, task_struct, thread.guest_asid);
-#endif
 	BLANK();
 }
 
@@ -413,6 +404,10 @@ void output_kvm_defines(void)
 	OFFSET(KVM_MIPS_VCPU_TE_GUEST_USER_ASID, kvm_mips_vcpu_te, guest_user_asid);
 
 	OFFSET(KVM_MIPS_VCPU_VZ_INJECTED_IPX, kvm_mips_vcpu_vz, injected_ipx);
+	OFFSET(KVM_MIPS_VCPU_VZ_MM_ASID, kvm_mips_vcpu_vz, mm_asid);
+	OFFSET(KVM_MIPS_VCPU_VZ_GUEST_ASID, kvm_mips_vcpu_vz, guest_asid);
+
+	DEFINE(KVM_MIPS_VZ_REGS_SIZE, sizeof(struct kvm_mips_vz_regs));
 
 	OFFSET(COP0_TLB_HI, mips_coproc, reg[MIPS_CP0_TLB_HI][0]);
 	OFFSET(COP0_STATUS, mips_coproc, reg[MIPS_CP0_STATUS][0]);

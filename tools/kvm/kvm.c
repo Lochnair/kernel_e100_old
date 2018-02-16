@@ -284,7 +284,7 @@ int kvm__init(struct kvm *kvm)
 		goto err_sys_fd;
 	}
 
-	kvm->vm_fd = ioctl(kvm->sys_fd, KVM_CREATE_VM, 1);
+	kvm->vm_fd = ioctl(kvm->sys_fd, KVM_CREATE_VM, KVM_VM_TYPE);
 	if (kvm->vm_fd < 0) {
 		pr_err("KVM_CREATE_VM ioctl");
 		ret = kvm->vm_fd;
@@ -349,8 +349,14 @@ static bool initrd_check(int fd)
 		!memcmp(id, CPIO_MAGIC, 4);
 }
 
-int load_elf_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline) __attribute__((__weak__));
-int load_elf_binary(struct kvm *kvm, int fd_kernel, int fd_initrd, const char *kernel_cmdline)
+int __attribute__((__weak__)) load_elf_binary(struct kvm *kvm, int fd_kernel,
+				int fd_initrd, const char *kernel_cmdline)
+{
+	return false;
+}
+
+bool __attribute__((__weak__)) load_bzimage(struct kvm *kvm, int fd_kernel,
+				int fd_initrd, const char *kernel_cmdline)
 {
 	return false;
 }
@@ -391,7 +397,6 @@ bool kvm__load_kernel(struct kvm *kvm, const char *kernel_filename,
 	if (ret)
 		goto found_kernel;
 
-
 	if (initrd_filename)
 		close(fd_initrd);
 	close(fd_kernel);
@@ -406,56 +411,6 @@ found_kernel:
 	return ret;
 }
 
-#define TIMER_INTERVAL_NS 1000000	/* 1 msec */
-
-/*
- * This function sets up a timer that's used to inject interrupts from the
- * userspace hypervisor into the guest at periodical intervals. Please note
- * that clock interrupt, for example, is not handled here.
- */
-int kvm_timer__init(struct kvm *kvm)
-{
-	struct itimerspec its;
-	struct sigevent sev;
-	int r;
-
-	memset(&sev, 0, sizeof(struct sigevent));
-	sev.sigev_value.sival_int	= 0;
-	sev.sigev_notify		= SIGEV_THREAD_ID;
-	sev.sigev_signo			= SIGALRM;
-	sev.sigev_value.sival_ptr	= kvm;
-	sev._sigev_un._tid		= syscall(__NR_gettid);
-
-	r = timer_create(CLOCK_REALTIME, &sev, &kvm->timerid);
-	if (r < 0)
-		return r;
-
-	its.it_value.tv_sec		= TIMER_INTERVAL_NS / 1000000000;
-	its.it_value.tv_nsec		= TIMER_INTERVAL_NS % 1000000000;
-	its.it_interval.tv_sec		= its.it_value.tv_sec;
-	its.it_interval.tv_nsec		= its.it_value.tv_nsec;
-
-	r = timer_settime(kvm->timerid, 0, &its, NULL);
-	if (r < 0) {
-		timer_delete(kvm->timerid);
-		return r;
-	}
-
-	return 0;
-}
-firmware_init(kvm_timer__init);
-
-int kvm_timer__exit(struct kvm *kvm)
-{
-	if (kvm->timerid)
-		if (timer_delete(kvm->timerid) < 0)
-			die("timer_delete()");
-
-	kvm->timerid = 0;
-
-	return 0;
-}
-firmware_exit(kvm_timer__exit);
 
 void kvm__dump_mem(struct kvm *kvm, unsigned long addr, unsigned long size, int debug_fd)
 {

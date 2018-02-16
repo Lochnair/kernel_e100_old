@@ -27,6 +27,7 @@
 #include <linux/mtd/partitions.h>
 #include <linux/of.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 #include <net/irda/parameters.h>
 
 
@@ -43,7 +44,7 @@
 
 #define MAX_NAND_NAME_LEN       20
 
-static const char *part_probes[] = { "cmdlinepart", NULL };
+static const char * const part_probes[] = { "cmdlinepart", NULL };
 
 #define DEV_DBG(_level, _dev, _format, _arg...)	do {			\
 	if (unlikely(debug & (_level)))					\
@@ -59,7 +60,7 @@ struct octeon_nand {
 	struct mtd_info mtd;
 	struct nand_chip nand;
 	/* Temporary location to store read data, must be 64 bit aligned */
-	uint8_t data[NAND_MAX_PAGESIZE + NAND_MAX_OOBSIZE] __attribute__((__aligned__(8)));
+	uint8_t data[NAND_MAX_PAGESIZE + NAND_MAX_OOBSIZE] __aligned(8);
 	uint8_t status;
 	int use_status;
 	int data_len;		/* Number of byte in the data buffer */
@@ -104,6 +105,7 @@ static struct octeon_nand *octeon_nand_open_mtd[8];
 static int octeon_nand_bch_correct(struct mtd_info *mtd, u_char *dat,
 				   u_char *read_ecc, u_char *isnull);
 
+
 /*
  * Read a single byte from the temporary buffer. Used after READID
  * to get the NAND information.
@@ -113,7 +115,7 @@ static uint8_t octeon_nand_read_byte(struct mtd_info *mtd)
 	struct octeon_nand *priv = container_of(mtd, struct octeon_nand, mtd);
 
 	if (priv->use_status) {
-		DEV_DBG(DEBUG_READ, priv->dev, 
+		DEV_DBG(DEBUG_READ, priv->dev,
 			"returning status: 0x%x\n", priv->status);
 		return priv->status;
 	}
@@ -165,11 +167,11 @@ static void octeon_nand_write_buf(struct mtd_info *mtd, const uint8_t *buf,
 	DEV_DBG(DEBUG_WRITE_BUFFER, priv->dev, "len=%d\n", len);
 	if (len <= (sizeof(priv->data) - priv->data_len)) {
 		memcpy(priv->data + priv->data_len, buf, len);
-	priv->data_len += len;
+		priv->data_len += len;
 		memset(priv->data + priv->data_len, 0xff,
 			sizeof(priv->data) - priv->data_len);
 	} else {
-		printk("Not enough data to write %d bytes\n", len);
+		dev_err(priv->dev, "Not enough data to write %d bytes\n", len);
 	}
 }
 
@@ -218,15 +220,18 @@ static int octeon_nand_hw_bch_read_page(struct mtd_info *mtd,
 	int i, eccsize = chip->ecc.size;
 	int eccbytes = chip->ecc.bytes;
 	int eccsteps = chip->ecc.steps;
-	uint8_t *p = buf;
+	uint8_t *p;
 	uint8_t *ecc_code = chip->buffers->ecccode;
 	uint32_t *eccpos = chip->ecc.layout->eccpos;
 
 	DEV_DBG(DEBUG_READ, priv->dev, "%s(%p, %p, %p, %d, %d)\n", __func__,
 		mtd, chip, buf, oob_required, page);
 
-	chip->read_buf(mtd, buf, mtd->writesize);
-	chip->read_buf(mtd, chip->oob_poi, mtd->oobsize);
+	/* chip->read_buf() insists on sequential order, we do OOB first */
+	memcpy(chip->oob_poi, priv->data + mtd->writesize, mtd->oobsize);
+
+	/* Use private->data buffer as input for ECC correction */
+	p = priv->data;
 
 	for (i = 0; i < chip->ecc.total; i++)
 		ecc_code[i] = chip->oob_poi[eccpos[i]];
@@ -234,9 +239,11 @@ static int octeon_nand_hw_bch_read_page(struct mtd_info *mtd,
 	for (i = 0; eccsteps; eccsteps--, i += eccbytes, p += eccsize) {
 		int stat;
 
-		DEV_DBG(DEBUG_READ, priv->dev, "Correcting block offset %ld, ecc offset %d\n",
+		DEV_DBG(DEBUG_READ, priv->dev,
+			"Correcting block offset %ld, ecc offset %d\n",
 			p - buf, i);
 		stat = chip->ecc.correct(mtd, p, &ecc_code[i], NULL);
+
 		if (stat < 0) {
 			mtd->ecc_stats.failed++;
 			DEV_DBG(DEBUG_ALL, priv->dev,
@@ -245,6 +252,10 @@ static int octeon_nand_hw_bch_read_page(struct mtd_info *mtd,
 			mtd->ecc_stats.corrected += stat;
 		}
 	}
+
+	/* Copy corrected data to caller's buffer now */
+	memcpy(buf, priv->data, mtd->writesize);
+
 	return 0;
 }
 
@@ -256,7 +267,7 @@ static int octeon_nand_hw_bch_write_page(struct mtd_info *mtd,
 	int i, eccsize = chip->ecc.size;
 	int eccbytes = chip->ecc.bytes;
 	int eccsteps = chip->ecc.steps;
-	const uint8_t *p = buf;
+	const uint8_t *p;
 	uint32_t *eccpos = chip->ecc.layout->eccpos;
 	uint8_t *ecc_calc = chip->buffers->ecccalc;
 
@@ -265,6 +276,11 @@ static int octeon_nand_hw_bch_write_page(struct mtd_info *mtd,
 	for (i = 0; i < chip->ecc.total; i++)
 		ecc_calc[i] = 0xFF;
 
+	/* Copy the page data from caller's buffers to private buffer */
+	chip->write_buf(mtd, buf, mtd->writesize);
+	/* Use private date as source for ECC calculation */
+	p = priv->data;
+
 	/* Hardware ECC calculation */
 	for (i = 0; eccsteps; eccsteps--, i += eccbytes, p += eccsize) {
 		int ret;
@@ -272,16 +288,18 @@ static int octeon_nand_hw_bch_write_page(struct mtd_info *mtd,
 		ret = chip->ecc.calculate(mtd, p, &ecc_calc[i]);
 
 		if (ret < 0)
-			DEV_DBG(DEBUG_WRITE, priv->dev, "=== chip->ecc.calculate(mtd, p=%p, &ecc_calc[i]) returned %d\n", p, ret);
-		
-		DEV_DBG(DEBUG_WRITE, priv->dev, "block offset %ld, ecc offset %d\n",
-			p - buf, i);
+			DEV_DBG(DEBUG_WRITE, priv->dev,
+				"calculate(mtd, p, &ecc_calc[i]) returned %d\n",
+				ret);
+
+		DEV_DBG(DEBUG_WRITE, priv->dev,
+			"block offset %ld, ecc offset %d\n", p - buf, i);
 	}
 
 	for (i = 0; i < chip->ecc.total; i++)
 		chip->oob_poi[eccpos[i]] = ecc_calc[i];
 
-	chip->write_buf(mtd, buf, mtd->writesize);
+	/* Store resulting OOB into private buffer, will be sent to HW */
 	chip->write_buf(mtd, chip->oob_poi, mtd->oobsize);
 
 	return 0;
@@ -398,7 +416,7 @@ static void octeon_nand_cmdfunc(struct mtd_info *mtd, unsigned command,
 		 * Read length must be a multiple of 8, so read a
 		 * little more than we require.
 		 */
-		priv->data_len = cvmx_nand_read_id(priv->selected_chip, 0,
+		priv->data_len = cvmx_nand_read_id(priv->selected_chip, (uint64_t)column,
 						virt_to_phys(priv->data), 16);
 		if (priv->data_len < 16) {
 			dev_err(priv->dev, "READID failed with %d\n",
@@ -416,8 +434,9 @@ static void octeon_nand_cmdfunc(struct mtd_info *mtd, unsigned command,
 		 * reading 8 bytes from the end of page.
 		 */
 		priv->data_len = cvmx_nand_page_read(priv->selected_chip,
-					(page_addr << nand->page_shift) +
-					(1 << nand->page_shift) - priv->data_index,
+					((uint64_t)page_addr << nand->page_shift) +
+					(1 << nand->page_shift) -
+					priv->data_index,
 					virt_to_phys(priv->data),
 					mtd->oobsize + priv->data_index);
 		if (priv->data_len < mtd->oobsize + priv->data_index) {
@@ -434,7 +453,7 @@ static void octeon_nand_cmdfunc(struct mtd_info *mtd, unsigned command,
 		/* Here mtd->oobsize _must_ already be a multiple of 8 */
 		priv->data_len = cvmx_nand_page_read(priv->selected_chip,
 					column +
-					(page_addr << nand->page_shift),
+					((uint64_t)page_addr << nand->page_shift),
 					virt_to_phys(priv->data),
 					(1 << nand->page_shift) +
 					mtd->oobsize);
@@ -449,7 +468,7 @@ static void octeon_nand_cmdfunc(struct mtd_info *mtd, unsigned command,
 		DEV_DBG(DEBUG_CONTROL, priv->dev,
 			"ERASE1 page_addr=0x%x\n", page_addr);
 		if (cvmx_nand_block_erase(priv->selected_chip,
-			page_addr << nand->page_shift)) {
+			(uint64_t)page_addr << nand->page_shift)) {
 			dev_err(priv->dev, "ERASE1 failed\n");
 		}
 		break;
@@ -460,19 +479,18 @@ static void octeon_nand_cmdfunc(struct mtd_info *mtd, unsigned command,
 		break;
 
 	case NAND_CMD_STATUS:
-	{
 		DEV_DBG(DEBUG_CONTROL, priv->dev, "STATUS\n");
 		priv->status = cvmx_nand_get_status(priv->selected_chip);
 		priv->use_status = 1;
 
 		break;
-	}
 
 	case NAND_CMD_SEQIN:
 		DEV_DBG(DEBUG_CONTROL, priv->dev,
 			"SEQIN column=%d page_addr=0x%x\n", column, page_addr);
 		/* If we don't seem to be doing sequential writes then erase
 			all data assuming it is old */
+		/* FIXME: if (priv->selected_page != page_addr) */
 		if (priv->data_index != column)
 			memset(priv->data, 0xff, sizeof(priv->data));
 		priv->data_index = column;
@@ -483,7 +501,7 @@ static void octeon_nand_cmdfunc(struct mtd_info *mtd, unsigned command,
 	case NAND_CMD_PAGEPROG:
 		DEV_DBG(DEBUG_CONTROL, priv->dev, "PAGEPROG\n");
 		status = cvmx_nand_page_write(priv->selected_chip,
-			priv->selected_page << nand->page_shift,
+			(uint64_t)priv->selected_page << nand->page_shift,
 			virt_to_phys(priv->data));
 		if (status)
 			dev_err(priv->dev, "PAGEPROG failed with %d\n",	status);
@@ -532,10 +550,14 @@ static int octeon_nand_bch_calculate_ecc_internal(struct octeon_nand *priv,
 						  uint8_t *code)
 {
 	struct nand_chip *nand_chip = &priv->nand;
-	volatile static cvmx_bch_response_t response;
+	static cvmx_bch_response_t response;
 	int rc;
 	int i;
 	static uint8_t *ecc_buffer;
+
+	/* Can only use logical or xkphys pointers */
+	WARN_ON(is_vmalloc_or_module_addr(buf));
+	WARN_ON(is_vmalloc_or_module_addr(code));
 
 	if (!ecc_buffer)
 		ecc_buffer = kmalloc(1024, GFP_KERNEL);
@@ -545,8 +567,10 @@ static int octeon_nand_bch_calculate_ecc_internal(struct octeon_nand *priv,
 	memset(ecc_buffer, 0, nand_chip->ecc.bytes);
 
 	response.u16 = 0;
+	barrier();
 
-	rc = cvmx_bch_encode((void *)buf, nand_chip->ecc.size, nand_chip->ecc.strength,
+	rc = cvmx_bch_encode((void *)buf, nand_chip->ecc.size,
+			     nand_chip->ecc.strength,
 			     (void *)ecc_buffer, &response);
 
 	if (rc) {
@@ -555,10 +579,12 @@ static int octeon_nand_bch_calculate_ecc_internal(struct octeon_nand *priv,
 	}
 
 	udelay(10);
+	barrier();
 
 	if (!response.s.done) {
-		DEV_DBG(DEBUG_ALL, priv->dev, "octeon_bch_encode timed out, response done: %d, \
-			 uncorrectable: %d, num_errors: %d, erased: %d\n",
+		dev_err(priv->dev,
+			"octeon_bch_encode timed out, response done: %d, "
+			 "uncorrectable: %d, num_errors: %d, erased: %d\n",
 			response.s.done, response.s.uncorrectable,
 			response.s.num_errors, response.s.erased);
 		cvmx_bch_shutdown();
@@ -566,7 +592,7 @@ static int octeon_nand_bch_calculate_ecc_internal(struct octeon_nand *priv,
 		return -1;
 	}
 
-		memcpy(code, ecc_buffer, nand_chip->ecc.bytes);
+	memcpy(code, ecc_buffer, nand_chip->ecc.bytes);
 
 	for (i = 0; i < nand_chip->ecc.bytes; i++)
 		code[i] ^= priv->eccmask[i];
@@ -587,12 +613,11 @@ static int octeon_nand_bch_calculate(struct mtd_info *mtd,
 	int ret;
 	struct octeon_nand *priv = container_of(mtd, struct octeon_nand, mtd);
 
-	ret = octeon_nand_bch_calculate_ecc_internal(priv, (void *)dat, (void *)ecc_code);
+	ret = octeon_nand_bch_calculate_ecc_internal(
+					priv, (void *)dat, (void *)ecc_code);
 
 	return ret;
 }
-
-
 /*
  * Detect and correct multi-bit ECC for a page
  *
@@ -608,31 +633,36 @@ static int octeon_nand_bch_correct(struct mtd_info *mtd, u_char *dat,
 {
 	struct octeon_nand *priv = container_of(mtd, struct octeon_nand, mtd);
 	struct nand_chip *nand_chip = &priv->nand;
-	volatile static cvmx_bch_response_t response;
+	static cvmx_bch_response_t response;
 	int rc;
 	int i = nand_chip->ecc.size + nand_chip->ecc.bytes;
-	static uint8_t *data_buffer = NULL;
-	static int buffer_size = 0;
+	static uint8_t *data_buffer;
+	static int buffer_size;
 	int max_time = 100;
 
+	/* Can only use logical or xkphys pointers */
+	WARN_ON(is_vmalloc_or_module_addr(dat));
+
 	if (i > buffer_size) {
-		if (data_buffer)
-			kfree(data_buffer);
+		kfree(data_buffer);
 		data_buffer = kmalloc(i, GFP_KERNEL);
 		if (!data_buffer) {
-			dev_err(priv->dev, "%s: Could not allocate %d bytes for buffer\n",
+			dev_err(priv->dev,
+				"%s: Could not allocate %d bytes for buffer\n",
 				__func__, i);
 			goto error;
 		}
 	}
 
 	memcpy(data_buffer, dat, nand_chip->ecc.size);
-	memcpy(data_buffer + nand_chip->ecc.size, read_ecc, nand_chip->ecc.bytes);
+	memcpy(data_buffer + nand_chip->ecc.size, read_ecc,
+							nand_chip->ecc.bytes);
 
 	for (i = 0; i < nand_chip->ecc.bytes; i++)
 		data_buffer[nand_chip->ecc.size + i] ^= priv->eccmask[i];
 
 	response.u16 = 0;
+	barrier();
 
 	rc = cvmx_bch_decode(data_buffer, nand_chip->ecc.size,
 			     nand_chip->ecc.strength, dat, &response);
@@ -643,8 +673,10 @@ static int octeon_nand_bch_correct(struct mtd_info *mtd, u_char *dat,
 	}
 
 	/* Wait for BCH engine to finsish */
-	while (!response.s.done && max_time--)
+	while (!response.s.done && max_time--) {
 		udelay(1);
+		barrier();
+	}
 
 	if (!response.s.done) {
 		dev_err(priv->dev, "Error: BCH engine timeout\n");
@@ -784,9 +816,10 @@ static int octeon_read_extended_parameters(struct octeon_nand *priv)
 
 	down(&octeon_bootbus_sem);
 	if (cvmx_nand_read_param_page(priv->selected_chip,
-				      cvmx_ptr_to_phys(priv->data), 1024) != 1024) {
-		dev_err(priv->dev, "Could not read extended parameters from NAND chip %d\n",
-		       priv->selected_chip);
+			      cvmx_ptr_to_phys(priv->data), 1024) != 1024) {
+		dev_err(priv->dev,
+			"Could not read extended parameters from NAND chip %d\n",
+			priv->selected_chip);
 		up(&octeon_bootbus_sem);
 		return -1;
 	}
@@ -802,13 +835,13 @@ static int octeon_read_extended_parameters(struct octeon_nand *priv)
 			continue;
 
 		if (octeon_onfi_crc16(ONFI_CRC_BASE,
-				      (uint8_t *)hdr->sig, size - 2) == le16_to_cpu(hdr->crc))
+			(uint8_t *)hdr->sig, size - 2) == le16_to_cpu(hdr->crc))
 			break;
 		hdr = calc_next_ext_page(hdr, &offset);
 	} while (hdr);
 
-	DEV_DBG(DEBUG_ALL, priv->dev, "Found valid extended parameter page at offset %d\n",
-		offset);
+	DEV_DBG(DEBUG_ALL, priv->dev,
+		"Found valid extended parameter page at offset %d\n", offset);
 
 	/* Since the types are always in order then section type 2 for
 	 * extended ECC information must be within the first two entries.
@@ -818,7 +851,8 @@ static int octeon_read_extended_parameters(struct octeon_nand *priv)
 		if (hdr->section_types[i].type == NAND_EXTENDED_ECC)
 			break;
 		if (hdr->section_types[i].type == NAND_EXTENDED_UNUSED) {
-			dev_err(priv->dev, "%s: No ECC section found\n", __func__);
+			dev_err(priv->dev,
+				"%s: No ECC section found\n", __func__);
 			return 0;
 		}
 
@@ -828,16 +862,18 @@ static int octeon_read_extended_parameters(struct octeon_nand *priv)
 	ecc_info = (struct nand_extended_ecc_info *)
 					(((uint8_t *)(hdr + 1)) + offset);
 
-	DEV_DBG(DEBUG_ALL, priv->dev, "Found extended ecc header at offset %d in header\n", offset);
+	DEV_DBG(DEBUG_ALL, priv->dev,
+		"Found extended ecc header at offset %d in header\n", offset);
 	priv->nand.ecc.strength = ecc_info->ecc_bits;
 	priv->nand.ecc.size = 1 << ecc_info->ecc_size;
 	if (priv->nand.ecc.strength < 0 || priv->nand.ecc.size > 2048) {
-		DEV_DBG(DEBUG_ALL, priv->dev, "NAND ecc size of %d or strength %d not supported\n",
-		       ecc_info->ecc_bits, priv->nand.ecc.size);
+		DEV_DBG(DEBUG_ALL, priv->dev,
+			"NAND ecc size of %d or strength %d not supported\n",
+			ecc_info->ecc_bits, priv->nand.ecc.size);
 		return -1;
 	}
-	DEV_DBG(DEBUG_ALL, priv->dev, "%s: ecc strength: %d, ecc size: %d\n", __func__,
-	      priv->nand.ecc.strength, priv->nand.ecc.size);
+	DEV_DBG(DEBUG_ALL, priv->dev, "%s: ecc strength: %d, ecc size: %d\n",
+		__func__, priv->nand.ecc.strength, priv->nand.ecc.size);
 
 	return 0;
 }
@@ -871,15 +907,18 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 	if (cvmx_nand_read_param_page(priv->selected_chip,
 				      cvmx_ptr_to_phys(priv->data),
 				      256 * 3) < 256 * 3) {
-		DEV_DBG(DEBUG_ALL, priv->dev, "%s: Error reading ONFI parameter data for chip %d\n",
+		DEV_DBG(DEBUG_ALL, priv->dev,
+			"%s: Error reading ONFI parameter data for chip %d\n",
 		       __func__, priv->selected_chip);
 		goto out;
 	}
 
 	onfi_params =
-		cvmx_nand_onfi_process((cvmx_nand_onfi_param_page_t *)priv->data);
+		cvmx_nand_onfi_process(
+			(cvmx_nand_onfi_param_page_t *)priv->data);
 	if (!onfi_params) {
-		DEV_DBG(DEBUG_ALL, priv->dev, "%s: Invalid ONFI parameter data for chip %d\n",
+		DEV_DBG(DEBUG_ALL, priv->dev,
+			"%s: Invalid ONFI parameter data for chip %d\n",
 			__func__, priv->selected_chip);
 		goto out;
 	}
@@ -890,8 +929,10 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 	       sizeof(struct nand_onfi_params));
 
 	priv->nand.onfi_version =
-		revision_decode[fls(le16_to_cpu(priv->nand.onfi_params.revision))];
-	DEV_DBG(DEBUG_ALL, priv->dev, "ONFI revision %d\n", priv->nand.onfi_version);
+		revision_decode[
+			fls(le16_to_cpu(priv->nand.onfi_params.revision))];
+	DEV_DBG(DEBUG_ALL, priv->dev,
+		"ONFI revision %d\n", priv->nand.onfi_version);
 
 	priv->nand.page_shift =
 		fls(le32_to_cpu(priv->nand.onfi_params.byte_per_page)) - 1;
@@ -909,10 +950,12 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 		priv->nand.ecc.bytes = 3;
 		priv->nand.ecc.size = 256;
 		priv->nand.ecc.strength = 1;
-		DEV_DBG(DEBUG_ALL, priv->dev, "NAND chip %d using single bit ECC\n",
+		DEV_DBG(DEBUG_ALL, priv->dev,
+			"NAND chip %d using single bit ECC\n",
 		      priv->selected_chip);
 	} else if (octeon_has_feature(OCTEON_FEATURE_BCH)) {
-		DEV_DBG(DEBUG_ALL, priv->dev, "Using hardware ECC syndrome support\n");
+		DEV_DBG(DEBUG_ALL, priv->dev,
+			"Using hardware ECC syndrome support\n");
 		priv->nand.ecc.mode = NAND_ECC_HW_SYNDROME;
 		priv->nand.ecc.strength = priv->nand.onfi_params.ecc_bits;
 		priv->nand.ecc.read_page = octeon_nand_hw_bch_read_page;
@@ -925,16 +968,15 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 			/* If 0xff then we need to access the extended parameter
 			 * page.
 			 */
-			if (octeon_read_extended_parameters(priv)) {
+			if (octeon_read_extended_parameters(priv))
 				return -1;
-			}
 		} else {
 			priv->nand.ecc.size = 512;
 		}
 
 		{
 		/*
-		 * nand.ecc.strength will be used as ecc_level so 
+		 * nand.ecc.strength will be used as ecc_level so
 		 * it should be in {4, 8, 16, 24, 32, 40, 48, 56, 60, 64}
 		 * needed ecc_bytes for m=15 (hardcoded in NAND controller)
 		 */
@@ -944,34 +986,47 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 		 * per above ecc_lvls {4,8, 16...64} are
 		 */
 		int ecc_bytes[] = {8, 15, 30, 45, 60, 75, 90, 105, 113, 120};
-		int ecc_totalbytes[] = {32, 60, 120, 180, 240, 300, 360, 420, 452, 480};
-		/* first set the desired ecc_level to match ecc_lvls[] */ 
+		int ecc_totalbytes[] = {
+			32, 60, 120, 180, 240, 300, 360, 420, 452, 480};
+		/* first set the desired ecc_level to match ecc_lvls[] */
 		int index = /* 0..9 */
 			(priv->nand.ecc.strength >= 64) ? 9/*64*/ :
-			(priv->nand.ecc.strength > 56 && priv->nand.ecc.strength <= 60) ? 8/*60*/ :
-			(priv->nand.ecc.strength > 48 && priv->nand.ecc.strength <= 56) ? 7/*56*/ :
-			(priv->nand.ecc.strength > 40 && priv->nand.ecc.strength <= 48) ? 6/*48*/ :
-			(priv->nand.ecc.strength > 32 && priv->nand.ecc.strength <= 40) ? 5/*40*/ :
-			(priv->nand.ecc.strength > 48 && priv->nand.ecc.strength <= 32) ? 4/*32*/ :
-			(priv->nand.ecc.strength > 16 && priv->nand.ecc.strength <= 24) ? 3/*24*/ :
-			(priv->nand.ecc.strength >  8 && priv->nand.ecc.strength <= 16) ? 2/*16*/ :
-			(priv->nand.ecc.strength >  4 && priv->nand.ecc.strength <=  8) ? 1/*8*/ :
-			(priv->nand.ecc.strength >  1 && priv->nand.ecc.strength <=  4) ? 0/*4*/: 0;
+			(priv->nand.ecc.strength > 56 &&
+				priv->nand.ecc.strength <= 60) ? 8/*60*/ :
+			(priv->nand.ecc.strength > 48 &&
+				priv->nand.ecc.strength <= 56) ? 7/*56*/ :
+			(priv->nand.ecc.strength > 40 &&
+				priv->nand.ecc.strength <= 48) ? 6/*48*/ :
+			(priv->nand.ecc.strength > 32 &&
+				priv->nand.ecc.strength <= 40) ? 5/*40*/ :
+			(priv->nand.ecc.strength > 48 &&
+				priv->nand.ecc.strength <= 32) ? 4/*32*/ :
+			(priv->nand.ecc.strength > 16 &&
+				priv->nand.ecc.strength <= 24) ? 3/*24*/ :
+			(priv->nand.ecc.strength >  8 &&
+				priv->nand.ecc.strength <= 16) ? 2/*16*/ :
+			(priv->nand.ecc.strength >  4 &&
+				priv->nand.ecc.strength <=  8) ? 1/*8*/ :
+			(priv->nand.ecc.strength >  1 &&
+				priv->nand.ecc.strength <=  4) ? 0/*4*/: 0;
 		/*
-		 * ..then check if there is enough space in OOB to store ECC bytes 
-		 * and eventualy (if not) change ecc.strenght the the best possible value
+		 * ..then check if there is enough space in OOB to store
+		 * ECC bytes and eventualy (if not) change ecc.strenght
+		 * the the best possible value
 		 */
-		if (ecc_totalbytes[index] <= cvmx_nand_get_oob_size(priv->selected_chip) - 2) {
+		if (ecc_totalbytes[index] <=
+			cvmx_nand_get_oob_size(priv->selected_chip) - 2) {
 			priv->nand.ecc.strength = ecc_lvls[index];
 			priv->nand.ecc.bytes = ecc_bytes[index];
 		} else {
 			int i = 9;
-			while (ecc_totalbytes[i] > cvmx_nand_get_oob_size(priv->selected_chip))
+			while (ecc_totalbytes[i] >
+				cvmx_nand_get_oob_size(priv->selected_chip))
 				i--;
 			priv->nand.ecc.strength = ecc_lvls[i];
 			priv->nand.ecc.bytes = ecc_bytes[i];
 		}
-		
+
 		/*
 		 * strength=24 needs total of ecc.bytes=180 for 4k page
 		 * strength=32 needs total of ecc.bytes=240 for 4k page
@@ -979,7 +1034,7 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 		 * ecc.strength=24 ,ecc.bytes=45 and ecc_totalbytes=180
 		 */
 		}
-		
+
 		/* The number of ECC bits required is m * t
 		 * where (2^m) - 1 > bits per ecc block and
 		 * t is the number of correctible bits.  So if
@@ -993,12 +1048,15 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 		 * OCTEON requires ((15 * t) + 7) / 8
 		 */
 		priv->nand.ecc.bytes = ((15 * priv->nand.ecc.strength) + 7) / 8;
-		
-		priv->nand.ecc.steps = (1 << priv->nand.page_shift) / priv->nand.ecc.size;
+
+		priv->nand.ecc.steps = (1 << priv->nand.page_shift) /
+							priv->nand.ecc.size;
 		priv->nand.ecc.calculate = octeon_nand_bch_calculate;
 		priv->nand.ecc.correct = octeon_nand_bch_correct;
 		priv->nand.ecc.hwctl = octeon_nand_bch_hwctl;
-		DEV_DBG(DEBUG_INIT, priv->dev, "NAND chip %d using hw_bch ECC for %d bits of correction per %d byte block.  ECC size is %d bytes\n",
+		DEV_DBG(DEBUG_INIT, priv->dev,
+			"NAND chip %d using hw_bch ECC for %d bits of "
+			"correction per %d byte block.  ECC size is %d bytes\n",
 		      priv->selected_chip,
 		      priv->nand.ecc.strength,
 		      priv->nand.ecc.size,
@@ -1011,7 +1069,9 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 			 * page.
 			 */
 			if (octeon_read_extended_parameters(priv)) {
-				DEV_DBG(DEBUG_INIT, priv->dev, "%s: Error reading ONFI extended parameter data for chip %d\n",
+				DEV_DBG(DEBUG_INIT, priv->dev,
+					"%s: Error reading ONFI extended "
+					"parameter data for chip %d\n",
 				       __func__, priv->selected_chip);
 				return -1;
 			}
@@ -1028,10 +1088,13 @@ static int octeon_nand_scan_onfi(struct octeon_nand *priv)
 		 * total of 52 bits.  Rounding up this is 7
 		 * bytes.
 		 */
-		priv->nand.ecc.bytes = (((fls(priv->nand.ecc.size) - 1 + 3 + 1) *
-				    priv->nand.ecc.strength) + 7) / 8;
-		priv->nand.ecc.steps = (1 << priv->nand.page_shift) / priv->nand.ecc.size;
-		DEV_DBG(DEBUG_INIT, priv->dev, "NAND chip %d using soft_bch ECC for %d bits of correction per %d byte block.  ECC size is %d bytes\n",
+		priv->nand.ecc.bytes = (((fls(priv->nand.ecc.size) - 1 + 3 + 1)
+					* priv->nand.ecc.strength) + 7) / 8;
+		priv->nand.ecc.steps = (1 << priv->nand.page_shift) /
+							priv->nand.ecc.size;
+		DEV_DBG(DEBUG_INIT, priv->dev,
+			"NAND chip %d using soft_bch ECC for %d bits of "
+			"correction per %d byte block.  ECC size is %d bytes\n",
 		      priv->selected_chip,
 		      priv->nand.ecc.strength,
 		      priv->nand.ecc.size,
@@ -1075,9 +1138,9 @@ static int octeon_nand_calc_ecc_layout(struct octeon_nand *priv)
 	layout->eccbytes = chip->ecc.steps * chip->ecc.bytes;
 	/* Reserve 2 bytes for bad block marker */
 	if (layout->eccbytes + 2 > oobsize) {
-		DEV_DBG(DEBUG_INIT, priv->dev, "no suitable oob scheme available "
-		       "for oobsize %d eccbytes %u\n", oobsize,
-		       layout->eccbytes);
+		DEV_DBG(DEBUG_INIT, priv->dev,
+		"no suitable oob scheme available for oobsize %d eccbytes %u\n",
+		oobsize, layout->eccbytes);
 		goto fail;
 	}
 	/* put ecc bytes at oob tail */
@@ -1089,10 +1152,10 @@ static int octeon_nand_calc_ecc_layout(struct octeon_nand *priv)
 	chip->ecc.layout = layout;
 	priv->ecclayout = layout;
 
-	DEV_DBG(DEBUG_INIT, priv->dev, "  layout eccbytes: %d, free offset: %d, free length: %d\n",
-	      layout->eccbytes, layout->oobfree[0].offset,
-	      layout->oobfree[0].length);
-
+	DEV_DBG(DEBUG_INIT, priv->dev,
+		"  layout eccbytes: %d, free offset: %d, free length: %d\n",
+		layout->eccbytes, layout->oobfree[0].offset,
+		layout->oobfree[0].length);
 
 	return 0;
 
@@ -1112,7 +1175,8 @@ static int octeon_nand_hw_bch_init(struct octeon_nand *priv)
 	unsigned int eccbytes = chip->ecc.bytes;
 	uint8_t erased_ecc[eccbytes];
 
-	if (!octeon_has_feature(OCTEON_FEATURE_BCH))
+	/* Without HW BCH, the ECC callbacks would have not been installed */
+	if (priv->nand.ecc.mode != NAND_ECC_HW_SYNDROME)
 		return 0;
 
 	priv->eccmask = NULL;
@@ -1144,9 +1208,10 @@ static int octeon_nand_hw_bch_init(struct octeon_nand *priv)
 	memset(priv->eccmask, 0, eccbytes);
 	memset(erased_ecc, 0, eccbytes);
 
-	if (octeon_nand_bch_calculate_ecc_internal(priv, erased_page, erased_ecc)) {
+	if (octeon_nand_bch_calculate_ecc_internal(
+		priv, erased_page, erased_ecc))
 		goto fail;
-	}
+
 	kfree(erased_page);
 
 	for (i = 0; i < eccbytes; i++)
@@ -1155,13 +1220,10 @@ static int octeon_nand_hw_bch_init(struct octeon_nand *priv)
 	return 0;
 
 fail:
-	if (priv->eccmask) {
-		kfree(priv->eccmask);
-		priv->eccmask = NULL;
-	}
+	kfree(priv->eccmask);
+	priv->eccmask = NULL;
 
-	if (erased_page)
-		kfree(erased_page);
+	kfree(erased_page);
 
 	if (rc)
 		cvmx_bch_shutdown();
@@ -1312,7 +1374,6 @@ static int octeon_nand_probe(struct platform_device *pdev)
 
 		mtd_device_parse_register(&priv->mtd, part_probes,
 					  NULL, NULL, 0);
-
 		octeon_nand_open_mtd[chip] = priv;
 		chip_num++;
 	}

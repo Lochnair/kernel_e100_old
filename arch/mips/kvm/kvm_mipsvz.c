@@ -3,26 +3,25 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2012-2013 Cavium, Inc.
+ * Copyright (C) 2012-2014 Cavium, Inc.
  */
-/* #define DEBUG 1 */
+
+#include <linux/kvm_host.h>
+#include <linux/bitmap.h>
 #include <linux/module.h>
 #include <linux/err.h>
-#include <linux/kvm_host.h>
 #include <linux/kvm.h>
-#include <linux/perf_event.h>
 
-#include <asm/mipsregs.h>
-#include <asm/setup.h>
 #include <asm/mmu_context.h>
 #include <asm/kvm_mips_vz.h>
+#include <asm/mipsregs.h>
 #include <asm/pgalloc.h>
 #include <asm/branch.h>
+#include <asm/setup.h>
 #include <asm/inst.h>
 #include <asm/time.h>
 #include <asm/fpu.h>
 
-asmlinkage void handle_hypervisor(void);
 void mipsvz_start_guest(struct kvm_vcpu *vcpu);
 void mipsvz_exit_guest(void) __noreturn;
 
@@ -45,6 +44,39 @@ struct mipsvz_kvm_tlb_entry {
 	u32 pagemask;
 };
 
+
+static void mipsvz_check_asid(struct kvm_vcpu *vcpu)
+{
+	int cpu = raw_smp_processor_id();
+	struct kvm *kvm = vcpu->kvm;
+	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
+	struct kvm_mips_vcpu_vz *vcpu_vz = vcpu->arch.impl;
+	bool get_new_cntxt = 0;
+
+	/*
+	 * Make sure the Root guest and cpu_context are in the same
+	 * ASID generation -- we want to (unconditionally) switch back
+	 * to cpu_context when leaving the guest.
+	 */
+	do {
+		get_new_cntxt = false;
+		if ((kvm_mips_vz->asid[cpu] == 0) ||
+			((kvm_mips_vz->asid[cpu] ^ asid_cache(cpu)) &
+				ASID_VERSION_MASK)) {
+
+			kvm_mips_vz->asid[cpu] = get_new_asid(cpu);
+
+			if ((cpu_context(cpu, current->mm) ^ asid_cache(cpu)) &
+				ASID_VERSION_MASK) {
+				drop_mmu_context(current->mm, cpu);
+				get_new_cntxt = true;
+			}
+		}
+	} while (get_new_cntxt);
+
+	vcpu_vz->mm_asid = read_c0_entryhi() & ASID_MASK;
+	vcpu_vz->guest_asid = kvm_mips_vz->asid[cpu] & ASID_MASK;
+}
 
 static bool mipsvz_count_expired(u32 old_count, u32 new_count, u32 compare)
 {
@@ -151,24 +183,28 @@ static void mipsvz_readout_guest_cp0(struct kvm_mips_vcpu_vz *vcpu_vz)
 	MIPSVZ_GUEST_READOUT_SCRATCH(5);
 }
 
-static void mipsvz_exit_vm(struct pt_regs *regs, u32 exit_reason)
+static void mipsvz_exit_vm(struct kvm_vcpu *vcpu,
+			   struct kvm_mips_vz_regs *regs,
+			   u32 exit_reason)
 {
 	int i;
-	struct kvm_vcpu *vcpu = current->thread.vcpu;
 	struct kvm_run *kvm_run = vcpu->run;
 
 	for (i = 1; i < ARRAY_SIZE(vcpu->arch.gprs); i++)
-		vcpu->arch.gprs[i] = regs->regs[i];
+		vcpu->arch.gprs[i] = regs->pt.regs[i];
 	vcpu->arch.gprs[0] = 0; /* zero is special, and cannot be set. */
-	vcpu->arch.hi = regs->hi;
-	vcpu->arch.lo = regs->lo;
-	vcpu->arch.epc = regs->cp0_epc;
+	vcpu->arch.hi = regs->pt.hi;
+	vcpu->arch.lo = regs->pt.lo;
+	vcpu->arch.epc = regs->pt.cp0_epc;
 
 	kvm_run->exit_reason = exit_reason;
 
 	local_irq_disable();
 
-	clear_tsk_thread_flag(current, TIF_GUESTMODE);
+	/* Note that PGD and ASID were already switched in
+	   mipsvz_common_chain before handler (which triggered
+	   mipsvz_exit_vm) was invoked */
+
 	mipsvz_exit_guest();
 	/* Never returns here */
 }
@@ -179,14 +215,14 @@ static unsigned int  mipsvz_get_fcr31(void)
 	return 0;
 }
 
-static unsigned long mipsvz_compute_return_epc(struct pt_regs *regs)
+static unsigned long mipsvz_compute_return_epc(struct kvm_mips_vz_regs *regs)
 {
-	if (delay_slot(regs)) {
+	if (delay_slot(&regs->pt)) {
 		union mips_instruction insn;
 		insn.word = regs->cp0_badinstrp;
-		return __compute_return_epc_for_insn0(regs, insn, mipsvz_get_fcr31);
+		return __compute_return_epc_for_insn0(&regs->pt, insn, mipsvz_get_fcr31);
 	} else {
-		regs->cp0_epc += 4;
+		regs->pt.cp0_epc += 4;
 		return 0;
 	}
 }
@@ -273,12 +309,17 @@ out:
 	return r;
 }
 
-static int mipsvz_handle_io_in(struct kvm_vcpu *vcpu)
+static int mipsvz_handle_io_in(struct kvm_vcpu *vcpu, int is_mmio)
 {
 	unsigned long val = 0;
 	struct kvm_mips_vcpu_vz *vcpu_vz = vcpu->arch.impl;
-	void *dest = sizeof(struct kvm_run) + (char *)((void *)vcpu->run);
+	void *dest;
 	struct mipsvz_szreg r = mipsvz_get_load_params(vcpu_vz->last_exit_insn);
+
+	if (is_mmio)
+		dest = vcpu->run->mmio.data;
+	else
+		dest = sizeof(struct kvm_run) + (char *)((void *)vcpu->run);
 
 	if (r.reg < 0)
 		return -EINVAL;
@@ -318,10 +359,35 @@ static int mipsvz_handle_io_in(struct kvm_vcpu *vcpu)
 	return 0;
 }
 
+
+unsigned long mipsvz_ebase_page;
+
+extern char mipsvz_interrupt_chain;
+extern char mipsvz_interrupt_chain_end;
+extern char mipsvz_general_chain;
+extern char mipsvz_general_chain_end;
+
+void build_r4000_tlb_refill_handler(void *loc, bool kvm_root);
+
 int mipsvz_arch_init(const void *opaque)
 {
 	unsigned long saved_entryhi;
 	unsigned long flags;
+	char *mipsvz_ebase_addr;
+
+	mipsvz_ebase_page = get_zeroed_page(GFP_KERNEL);
+	if (!mipsvz_ebase_page)
+		return -ENOMEM;
+	mipsvz_ebase_addr = (char *)mipsvz_ebase_page;
+
+	build_r4000_tlb_refill_handler(mipsvz_ebase_addr, true);
+
+	memcpy(mipsvz_ebase_addr + 0x180, &mipsvz_general_chain,
+	       &mipsvz_general_chain_end - &mipsvz_general_chain);
+
+	memcpy(mipsvz_ebase_addr + 0x200, &mipsvz_interrupt_chain,
+	       &mipsvz_interrupt_chain_end - &mipsvz_interrupt_chain);
+	flush_icache_range(mipsvz_ebase_page, mipsvz_ebase_page + PAGE_SIZE);
 
 	local_irq_save(flags);
 	saved_entryhi = read_c0_entryhi();
@@ -333,6 +399,13 @@ int mipsvz_arch_init(const void *opaque)
 	local_irq_restore(flags);
 
 	return 0;
+}
+
+void mipsvz_arch_exit(void)
+{
+	if (mipsvz_ebase_page)
+		free_page(mipsvz_ebase_page);
+	mipsvz_ebase_page = 0;
 }
 
 int mipsvz_arch_hardware_enable(void *garbage)
@@ -358,8 +431,15 @@ static void mipsvz_release_pud(pud_t pud)
 	pmd_t *pmd = (pmd_t *)pud_val(pud);
 	int i;
 	for (i = 0; i < PTRS_PER_PMD; i++) {
-		if (pmd_present(pmd[i]))
+		if (pmd_present(pmd[i])) {
+			pte_t *pte = (pte_t *)pmd_val(pmd[i]);
+			int j;
+			for (j = 0; j < PTRS_PER_PTE; j++) {
+				if (pte_present(pte[j]))
+					kvm_release_pfn_clean(pte_pfn(pte[j]));
+			}
 			pte_free_kernel(NULL, (pte_t *)pmd_val(pmd[i]));
+		}
 	}
 	pmd_free(NULL, pmd);
 }
@@ -368,6 +448,7 @@ static void mipsvz_release_pud(pud_t pud)
 static void mipsvz_destroy_vm(struct kvm *kvm)
 {
 	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
+	struct kvm_vcpu *vcpu;
 	pgd_t *pgd;
 	pud_t *pud;
 	int i;
@@ -383,15 +464,31 @@ static void mipsvz_destroy_vm(struct kvm *kvm)
 	{
 		pmd_t *pmd = pmd_offset(pud, 0);
 		for (i = 0; i < PTRS_PER_PGD; i++) {
-			if (pmd_present(pmd[i]))
+			if (pmd_present(pmd[i])) {
+				pte_t *pte = (pte_t *)pmd_val(pmd[i]);
+				int j;
+				for (j = 0; j < PTRS_PER_PTE; j++) {
+					if (pte_present(pte[j]))
+						kvm_release_pfn_clean(pte_pfn(pte[j]));
+				}
 				pte_free_kernel(NULL, (pte_t *)pmd_val(pmd[i]));
+			}
 		}
 	}
 #endif
 
 	free_pages((unsigned long)kvm_mips_vz->pgd, PGD_ORDER);
-	if (kvm_mips_vz->irq_chip)
-		__free_page(kvm_mips_vz->irq_chip);
+
+	kvm_for_each_vcpu(i, vcpu, kvm) {
+		kvm_arch_vcpu_free(vcpu);
+	}
+
+	if (kvm_mips_vz->irq_chip) {
+		__free_page(kvm_mips_vz->irq_chip->page);
+		kfree(kvm_mips_vz->irq_chip);
+	}
+
+	kfree(kvm_mips_vz);
 }
 
 /* Must be called with guest_mm_lock held. */
@@ -422,19 +519,13 @@ static pte_t *mipsvz_pte_for_gpa(struct kvm *kvm, unsigned long addr)
 	return pte_offset(pmd, addr);
 }
 
-struct mipsvz_irqchip {
-	u32 num_irqs;
-	u32 num_cpus;
-};
-
 static int mipsvz_create_irqchip(struct kvm *kvm)
 {
 	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
 	int ret = 0;
 	pfn_t pfn;
 	pte_t *ptep, entry;
-	struct page *irq_chip;
-	struct mipsvz_irqchip *chip;
+	struct mipsvz_irq_chip *ic;
 
 	mutex_lock(&kvm->lock);
 
@@ -442,112 +533,118 @@ static int mipsvz_create_irqchip(struct kvm *kvm)
 		ret = -EEXIST;
 		goto out;
 	}
-
-	irq_chip = alloc_page(GFP_KERNEL | __GFP_ZERO);
-	if (!irq_chip) {
+	ic = kzalloc(sizeof(struct mipsvz_irq_chip), GFP_KERNEL);
+	if (!ic) {
 		ret = -ENOMEM;
 		goto out;
 	}
-	chip = page_address(irq_chip);
-	chip->num_irqs = 64;
-	chip->num_cpus = max(8, KVM_MAX_VCPUS);
 
-	ptep = mipsvz_pte_for_gpa(kvm, 0x1e010000);
+	ic->page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+	if (!ic->page) {
+		kfree(ic);
+		ret = -ENOMEM;
+		goto out;
+	}
+	ic->base = page_address(ic->page);
+	ic->version = KVM_MIPSVZ_IC_VERSION;
+	ic->numbits = KVM_MIPSVZ_IC_NUM_BITS;
+	ic->numcpus = min(KVM_MIPSVZ_IC_NUM_CPUS, KVM_MAX_VCPUS);
+	ic->bm_length = (ic->numbits + 32 - 1) / 32;
+	ic->bm_size = ic->bm_length * 4;
 
-	pfn = page_to_pfn(irq_chip);
+	/* size of some bitmaps depends on this */
+	BUG_ON(ic->numbits % 8);
+	/* all bitmaps have to fit into one page */
+	BUG_ON((ic->bm_size * (4 + ic->numcpus * 3)
+			+ KVM_MIPSVZ_IC_BM_AREA) > PAGE_SIZE);
+
+	*(unsigned int *)ic->base = ic->numbits;
+	*(unsigned int *)(ic->base + 4) = ic->numcpus;
+	*(unsigned int *)(ic->base + 8) = ic->version;
+
+	ic->cpu_irq_src_bitmap = (unsigned long)ic->base + KVM_MIPSVZ_IC_BM_AREA;
+	ic->cpu_irq_pend_bitmap = ic->cpu_irq_src_bitmap +
+		ic->numcpus * ic->bm_size;
+	ic->cpu_irq_en_bitmap = ic->cpu_irq_pend_bitmap +
+		ic->numcpus * ic->bm_size;
+	ic->irq_pend_bitmap = ic->cpu_irq_en_bitmap +
+		ic->numcpus * ic->bm_size;
+	ic->irq_en_bitmap = ic->irq_pend_bitmap + ic->bm_size;
+	ic->tmp_bitmap = ic->irq_en_bitmap + ic->bm_size;
+
+	ptep = mipsvz_pte_for_gpa(kvm, KVM_MIPSVZ_IRQCHIP_START);
+
+	pfn = page_to_pfn(ic->page);
 	entry = pfn_pte(pfn, __pgprot(_PAGE_VALID));
 	set_pte(ptep, entry);
 
-	kvm_mips_vz->irq_chip = irq_chip;
+	kvm_mips_vz->irq_chip = ic;
 out:
 	mutex_unlock(&kvm->lock);
 	return ret;
 }
 
-static void mipsvz_write_irqchip_w1x(u32 *irqchip_regs, int words_per_reg,
-				     unsigned int base, unsigned int offset,
-				     u32 val, u32 mask)
+/*
+ * IRQ-pending-bits or irq-enable-bits could have changed and thus
+ * recalculation of irq-src bitmaps for each online CPU is required:
+ *
+ * - determine "global" irq-source bitmap (saved in tmp_bm)
+ *
+ * - for each CPU: OR "global" irq-source bitmap with per CPU
+ *   irq-pending bitmap
+ *
+ * - AND resulting bitmap with per CPU irq-enable bitmap (and save
+ *   to per CPU irq-src bitmap)
+ *
+ * Resulting per CPU irq-src bitmap is read by guest to dispatch irqs.
+ */
+static u32 mipsvz_write_irqchip_new_irqs(struct kvm *kvm)
 {
-	int type = (offset - base) / words_per_reg;
-	int idx = (offset - base) % words_per_reg;
-
-	if (type == 0)  /* Set */
-		irqchip_regs[base + idx] = (irqchip_regs[base + idx] & ~mask) | (val & mask);
-	else if (type == 1) /* W1S*/
-		irqchip_regs[base + idx] |= (val & mask);
-	else if (type == 2) /* W1C*/
-		irqchip_regs[base + idx] &= ~(val & mask);
-
-	/* Make the W1S and W1C reg have the same value as the base reg. */
-	irqchip_regs[base + idx + 1 * words_per_reg] = irqchip_regs[base + idx];
-	irqchip_regs[base + idx + 2 * words_per_reg] = irqchip_regs[base + idx];
-}
-
-static void mipsvz_write_irqchip_reg(u32 *irqchip_regs, unsigned int offset, u32 val, u32 mask)
-{
-	int numbits = irqchip_regs[0];
-	int words_per_reg = numbits / 32;
-	int reg, reg_offset;
-	int rw_reg_base = 2;
-
-	if (offset <= 1 || offset >= (irqchip_regs[1] * (words_per_reg + 1) * 4))
-		return; /* ignore the write */
-
-	reg = (offset - rw_reg_base) / words_per_reg;
-	reg_offset = (offset - rw_reg_base) % words_per_reg;
-
-	if (reg_offset == 0)
-		mask &= ~0x1ffu; /* bits 8..0 are ignored */
-
-	if (reg <= 2) { /* Raw */
-		mipsvz_write_irqchip_w1x(irqchip_regs, words_per_reg, rw_reg_base, offset, val, mask);
-	} else {
-		/* Per CPU enables */
-		int cpu_first_reg = rw_reg_base + 3 * words_per_reg;
-		int cpu = (reg - 3) / 4;
-		int cpu_reg = (reg - 3) % 4;
-
-		if (cpu_reg != 0)
-			mipsvz_write_irqchip_w1x(irqchip_regs, words_per_reg,
-						 cpu_first_reg + words_per_reg + cpu * 4 * words_per_reg,
-						 offset, val, mask);
-	}
-}
-
-/* Returns a bit mask of vcpus where the */
-static u32 mipsvz_write_irqchip_new_irqs(struct kvm *kvm, u32 *irqchip_regs)
-{
+	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
+	struct mipsvz_irq_chip *ic = kvm_mips_vz->irq_chip;
+	struct kvm_mips_vcpu_vz *vcpu_vz = NULL;
+	unsigned long *cpu_irq_src_bm, *cpu_irq_en_bm, *cpu_irq_pend_bm;
+	unsigned long *irq_en_bm, *irq_pend_bm, *tmp_bm; /* *irq_src_bm; */
+	int cpu, ret, offset;
 	u32 r = 0;
-	int rw_reg_base = 2;
-	int numbits = irqchip_regs[0];
-	int numcpus = irqchip_regs[1];
-	int words_per_reg = numbits / 32;
-	int cpu;
+	u8 injected_ipx = 0;
 
-	for (cpu = 0; cpu < numcpus; cpu++) {
-		int cpu_base = rw_reg_base + (3 * words_per_reg) + (cpu * 4 * words_per_reg);
-		int word;
-		u32 combined = 0;
-		for (word = 0; word < words_per_reg; word++) {
-			/* SRC = EN & RAW */
-			irqchip_regs[cpu_base + word] = irqchip_regs[cpu_base + words_per_reg + word] & irqchip_regs[rw_reg_base + word];
-			combined |= irqchip_regs[cpu_base + word];
+	tmp_bm = (void *)ic->tmp_bitmap;
+	irq_en_bm = (void *)ic->irq_en_bitmap;
+	irq_pend_bm = (void *)ic->irq_pend_bitmap;
+
+	ret = bitmap_and(tmp_bm, irq_pend_bm, irq_en_bm,
+			KVM_MIPSVZ_IC_NUM_BITS);
+
+	for (cpu = 0; cpu < kvm_mips_vz->irq_chip->numcpus ; cpu++) {
+		if (kvm->vcpus[cpu]) {
+			vcpu_vz = kvm->vcpus[cpu]->arch.impl;
+			injected_ipx = vcpu_vz->injected_ipx;
+		}
+		offset = cpu * ic->bm_size;
+		cpu_irq_en_bm = (void *)(ic->cpu_irq_en_bitmap + offset);
+		cpu_irq_pend_bm = (void *)(ic->cpu_irq_pend_bitmap + offset);
+		cpu_irq_src_bm = (void *)(ic->cpu_irq_src_bitmap + offset);
+
+		/* OR global src_bm w/ per CPU irq-pending bitmap */
+		bitmap_or(tmp_bm, cpu_irq_pend_bm, tmp_bm,
+			KVM_MIPSVZ_IC_NUM_BITS);
+		ret = bitmap_and(tmp_bm, cpu_irq_en_bm, tmp_bm,
+				KVM_MIPSVZ_IC_NUM_BITS);
+		if (!ret) {
+			bitmap_zero(cpu_irq_src_bm, KVM_MIPSVZ_IC_NUM_BITS);
+			if (injected_ipx) {
+				r |= 1 << cpu;
+				vcpu_vz->injected_ipx = 0;
+			}
+			continue;
 		}
 
-		if (kvm->vcpus[cpu]) {
-			u8 injected_ipx;
-			struct kvm_mips_vcpu_vz *vcpu_vz = kvm->vcpus[cpu]->arch.impl;
-			u8 old_injected_ipx = vcpu_vz->injected_ipx;
+		bitmap_copy(cpu_irq_src_bm, tmp_bm, KVM_MIPSVZ_IC_NUM_BITS);
 
-			if (combined)
-				injected_ipx = 4;
-			else
-				injected_ipx = 0;
-
-			if (injected_ipx != old_injected_ipx) {
-				r |= 1 << cpu;
-				vcpu_vz->injected_ipx = injected_ipx;
-			}
+		if (kvm->vcpus[cpu] && !injected_ipx) {
+			r |= 1 << cpu;
+			vcpu_vz->injected_ipx = 4;
 		}
 	}
 	return r;
@@ -557,9 +654,6 @@ static void mipsvz_assert_irqs(struct kvm *kvm, u32 effected_cpus)
 {
 	int i, me;
 	struct kvm_vcpu *vcpu;
-
-	if (!effected_cpus)
-		return;
 
 	me = get_cpu();
 
@@ -580,123 +674,194 @@ static void mipsvz_assert_irqs(struct kvm *kvm, u32 effected_cpus)
 	put_cpu();
 }
 
-static bool mipsvz_write_irqchip(struct pt_regs *regs,
+/* Assumption mutex_lock(&kvm->lock) held */
+static int mipsvz_write_irqchip_reg(struct kvm *kvm, unsigned long irq,
+				unsigned int cpu, unsigned long offset)
+{
+	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
+	struct mipsvz_irq_chip *ic = kvm_mips_vz->irq_chip;
+	unsigned long flags;
+	unsigned long *bitmap;
+	u32 effected_cpus;
+	bool clear;
+
+	spin_lock_irqsave(&kvm_mips_vz->irq_chip_lock, flags);
+
+	clear = true;
+	switch (offset) {
+	case KVM_MIPSVZ_IC_REG_IRQ_SET:
+		clear = false;		/* fallthrough */
+	case KVM_MIPSVZ_IC_REG_IRQ_CLR:
+		bitmap = (void *)ic->irq_pend_bitmap;
+		break;
+
+	case KVM_MIPSVZ_IC_REG_IRQ_EN:
+		clear = false;		/* fallthrough */
+	case KVM_MIPSVZ_IC_REG_IRQ_DIS:
+		bitmap = (void *)ic->irq_en_bitmap;
+		break;
+
+	case KVM_MIPSVZ_IC_REG_CPU_IRQ_SET:
+		clear = false;		/* fallthrough */
+	case KVM_MIPSVZ_IC_REG_CPU_IRQ_CLR:
+		bitmap = (void *)(ic->cpu_irq_pend_bitmap + (cpu * ic->bm_size));
+		break;
+
+	case KVM_MIPSVZ_IC_REG_CPU_IRQ_EN:
+		clear = false;		/* fallthrough */
+	case KVM_MIPSVZ_IC_REG_CPU_IRQ_DIS:
+		bitmap = (void *)(ic->cpu_irq_en_bitmap + (cpu * ic->bm_size));
+		break;
+
+	default:
+		kvm_err("Error: Bad irq_chip register write. offset: 0x%lx\n",
+			offset);
+		goto err;
+	}
+
+	if (clear)
+		clear_bit(irq, bitmap);
+	else
+		set_bit(irq, bitmap);
+
+	effected_cpus = mipsvz_write_irqchip_new_irqs(kvm);
+
+	spin_unlock_irqrestore(&kvm_mips_vz->irq_chip_lock, flags);
+
+	if (effected_cpus)
+		mipsvz_assert_irqs(kvm, effected_cpus);
+
+	return 0;
+
+err:
+	return -EINVAL;
+}
+
+static bool mipsvz_write_irqchip(struct kvm_mips_vz_regs *regs,
 				 unsigned long write,
 				 unsigned long address,
 				 struct kvm *kvm,
 				 struct kvm_vcpu *vcpu)
 {
 	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
-	unsigned long flags;
 	struct mipsvz_szreg szreg;
-	u64 val;
-	u64 mask;
-	u32 *irqchip_regs;
-	u32 insn = regs->cp0_badinstr;
-	int offset = address - 0x1e010000;
-	u32 effected_cpus;
+	u32 insn, val, cpu;
+	unsigned long irq, offset;
+	int ret;
 
-	if (!write || !kvm_mips_vz->irq_chip) {
+	insn = regs->cp0_badinstr;
+	offset = address - KVM_MIPSVZ_IRQCHIP_START;
+
+	if (!write || ! kvm_mips_vz->irq_chip) {
 		kvm_err("Error: Read fault in irqchip\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
+
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on store emulation: %08x\n", insn);
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
+
 	szreg = mipsvz_get_store_params(insn);
-	val = regs->regs[szreg.reg];
-	mask = ~0ul >> (64 - (szreg.size * 8));
-	val &= mask;
-	val <<= 8 * (offset & 7);
-	mask <<= 8 * (offset & 7);
-
-	irqchip_regs = page_address(kvm_mips_vz->irq_chip);
-
-	mutex_lock(&kvm->lock);
-
-	spin_lock_irqsave(&kvm_mips_vz->irq_chip_lock, flags);
+	val = (u32)regs->pt.regs[szreg.reg];
 
 	if (szreg.size == 8) {
-		offset &= ~7;
-		mipsvz_write_irqchip_reg(irqchip_regs, offset / 4 + 1,
-					 (u32)(val >> 32), (u32)(mask >> 32));
-		mipsvz_write_irqchip_reg(irqchip_regs, offset / 4 ,
-					 (u32)val, (u32)mask);
-	} else {
-		if (offset & 4) {
-			val >>= 32;
-			mask >>= 32;
-		}
-		offset &= ~3;
-		mipsvz_write_irqchip_reg(irqchip_regs, offset / 4 ,
-					 (u32)val, (u32)mask);
+		kvm_err("Error: Bad szreg.size (8)\n");
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
-	effected_cpus = mipsvz_write_irqchip_new_irqs(kvm, irqchip_regs);
+	irq = val & (BIT(20) - 1);
+	cpu = val >> 20;
 
-	spin_unlock_irqrestore(&kvm_mips_vz->irq_chip_lock, flags);
-
-	mipsvz_assert_irqs(kvm, effected_cpus);
-
+	mutex_lock(&kvm->lock);
+	ret = mipsvz_write_irqchip_reg(kvm, irq, cpu, offset);
 	mutex_unlock(&kvm->lock);
+	if (ret)
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 
 	return true;
+}
+
+int kvm_set_msi(struct kvm_kernel_irq_routing_entry *e,
+		struct kvm *kvm, int irq_source_id, int level, bool line_status)
+{
+	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
+	unsigned long irq;
+
+	if (!level)
+		return -1;
+
+	if (!kvm_mips_vz->irq_chip)
+		return -ENODEV;
+
+	/* we have stored msi_nr there (take care of byte swapping) */
+	irq = le32_to_cpu(e->msi.data);
+
+	if (irq >= kvm_mips_vz->irq_chip->numbits)
+		return -EINVAL;
+
+	mipsvz_write_irqchip_reg(kvm, irq, 0, KVM_MIPSVZ_IC_REG_IRQ_SET);
+
+	return 0;
+}
+
+static int kvm_set_master_irq(struct kvm_kernel_irq_routing_entry *e,
+			      struct kvm *kvm, int irq_source_id, int level,
+			      bool line_status)
+{
+	printk(KERN_ERR "%s (%s: %d)\n", __func__, __FILE__, __LINE__);
+	return 0;
+}
+
+int kvm_set_routing_entry(struct kvm_irq_routing_table *rt,
+			  struct kvm_kernel_irq_routing_entry *e,
+			  const struct kvm_irq_routing_entry *ue)
+{
+	switch (ue->type) {
+	case KVM_IRQ_ROUTING_IRQCHIP:
+		e->set = kvm_set_master_irq;
+		e->irqchip.irqchip = ue->u.irqchip.irqchip;
+		e->irqchip.pin = ue->u.irqchip.pin;
+		rt->chip[ue->u.irqchip.irqchip][e->irqchip.pin] = ue->gsi;
+		break;
+	case KVM_IRQ_ROUTING_MSI:
+		e->set = kvm_set_msi;
+		e->msi.address_lo = ue->u.msi.address_lo;
+		e->msi.address_hi = ue->u.msi.address_hi;
+		e->msi.data = ue->u.msi.data;
+		break;
+	default:
+		break;
+	}
+	return 0;
 }
 
 static int mipsvz_irq_line(struct kvm *kvm, unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
 	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
-	unsigned long flags;
 	struct kvm_irq_level irq_level;
-	u32 *irqchip_regs;
-	u32 mask, val;
-	int numbits;
-	int i;
-	u32 effected_cpus;
-	int ret = 0;
 
 	if (!kvm_mips_vz->irq_chip)
 		return -ENODEV;
 
-	if (copy_from_user(&irq_level, argp, sizeof(irq_level))) {
-		ret = -EFAULT;
-		goto out;
-	}
-
-	irqchip_regs = page_address(kvm_mips_vz->irq_chip);
-	numbits = irqchip_regs[0];
+	if (copy_from_user(&irq_level, argp, sizeof(irq_level)))
+		return -EFAULT;
 
 	if (irq_level.irq < 9)
-		goto out; /* Ignore */
-	if (irq_level.irq >= numbits) {
-		ret = -EINVAL;
-		goto out;
-	}
+		return 0; /* Ignore */
+
+	if (irq_level.irq >= kvm_mips_vz->irq_chip->numbits)
+		return -EINVAL;
 
 	mutex_lock(&kvm->lock);
-
-	mask = 1ull << (irq_level.irq % 32);
-	i = irq_level.irq / 32;
 	if (irq_level.level)
-		val = mask;
+		mipsvz_write_irqchip_reg(kvm, irq_level.irq, 0, KVM_MIPSVZ_IC_REG_IRQ_SET);
 	else
-		val = 0;
-
-	spin_lock_irqsave(&kvm_mips_vz->irq_chip_lock, flags);
-
-	mipsvz_write_irqchip_reg(irqchip_regs, 2 + i, val, mask);
-	effected_cpus = mipsvz_write_irqchip_new_irqs(kvm, irqchip_regs);
-
-	spin_unlock_irqrestore(&kvm_mips_vz->irq_chip_lock, flags);
-
-	mipsvz_assert_irqs(kvm, effected_cpus);
-
+		mipsvz_write_irqchip_reg(kvm, irq_level.irq, 0, KVM_MIPSVZ_IC_REG_IRQ_CLR);
 	mutex_unlock(&kvm->lock);
 
-out:
-	return ret;
+	return 0;
 }
 
 static enum hrtimer_restart mipsvz_compare_timer_expire(struct hrtimer *t)
@@ -802,7 +967,8 @@ static void mipsvz_vcpu_free(struct kvm_vcpu *vcpu)
 	hrtimer_cancel(&vcpu_vz->compare_timer);
 	kfree(vcpu_vz->tlb_state);
 	kfree(vcpu_vz);
-	/* ?? kfree(vcpu); */
+	kvm_vcpu_uninit(vcpu);
+	kfree(vcpu);
 }
 
 static void mipsvz_vcpu_put(struct kvm_vcpu *vcpu)
@@ -863,13 +1029,14 @@ static void mipsvz_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	int mmu_sizem1;
 
 	vcpu->cpu = cpu;
-	if (test_tsk_thread_flag(current, TIF_GUESTMODE))
-		mips_kvm_rootsp[vcpu->cpu] = vcpu_vz->rootsp;
+	mips_kvm_rootsp[cpu] = vcpu_vz->rootsp;
 
 	/* write_c0_gtoffset(mipsvz_cp0_count_offset[cpu] + vcpu_vz->c0_count_offset); */
 	write_c0_gtoffset(0);
 
 	local_irq_save(flags);
+
+	mipsvz_check_asid(vcpu);
 
 	t32 = read_c0_guestctl0();
 	/* GM = RI = MC = SFC2 = PIP = 0; CP0 = GT = CG = CF = SFC1 = 1*/
@@ -933,7 +1100,7 @@ static void mipsvz_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 	local_flush_icache_range(0, 0);
 }
 
-static bool mipsvz_emulate_io(struct pt_regs *regs,
+static bool mipsvz_emulate_io(struct kvm_mips_vz_regs *regs,
 			      unsigned long write,
 			      unsigned long address,
 			      struct kvm *kvm,
@@ -944,9 +1111,9 @@ static bool mipsvz_emulate_io(struct pt_regs *regs,
 
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on store emulation: %08x\n", insn);
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
-	vcpu->run->io.port = address - 0x1e000000;
+	vcpu->run->io.port = address - KVM_MIPSVZ_IOPORT_START;
 	vcpu->run->io.count = 1;
 	/* Store the data after the end of the kvm_run */
 	vcpu->run->io.data_offset = sizeof(struct kvm_run);
@@ -956,11 +1123,11 @@ static bool mipsvz_emulate_io(struct pt_regs *regs,
 		struct mipsvz_szreg r = mipsvz_get_store_params(insn);
 		if (r.reg < 0) {
 			kvm_err("Error: Bad insn on store emulation: %08x\n", insn);
-			mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+			mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 		}
 		vcpu->run->io.size = r.size;
 		vcpu->run->io.direction = KVM_EXIT_IO_OUT;
-		val = regs->regs[r.reg];
+		val = regs->pt.regs[r.reg];
 		switch (r.size) {
 		case 1:
 			*(u8 *)dest = (u8)val;
@@ -987,21 +1154,100 @@ static bool mipsvz_emulate_io(struct pt_regs *regs,
 		struct mipsvz_szreg r = mipsvz_get_load_params(insn);
 		if (r.reg < 0) {
 			kvm_err("Error: Bad insn on load emulation: %08x\n", insn);
-			mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+			mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 		}
 		vcpu_vz->last_exit_insn = insn;
 		vcpu->run->io.size = r.size;
 		vcpu->run->io.direction = KVM_EXIT_IO_IN;
 		kvm_debug("I/O in %04x ...\n", vcpu->run->io.port);
 	}
-	mipsvz_exit_vm(regs, KVM_EXIT_IO);
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_IO);
+	/* Never Gets Here. */
+	return true;
+}
+
+static bool mipsvz_emulate_mmio(struct kvm_mips_vz_regs *regs,
+				unsigned long write,
+				unsigned long address,
+				struct kvm *kvm,
+				struct kvm_vcpu *vcpu)
+{
+	struct kvm_mips_vcpu_vz *vcpu_vz = vcpu->arch.impl;
+	u32 insn = regs->cp0_badinstr;
+	void *data = vcpu->run->mmio.data;
+	int srcu_idx;
+	int ret;
+
+	if (mipsvz_compute_return_epc(regs)) {
+		kvm_err("Error: Bad EPC on store emulation: %08x\n", insn);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
+	}
+	vcpu->run->mmio.phys_addr = address;
+	if (write) {
+		u64 val;
+		struct mipsvz_szreg r = mipsvz_get_store_params(insn);
+		if (r.reg < 0) {
+			kvm_err("Error: Bad insn on store emulation: %08x\n", insn);
+			mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
+		}
+		vcpu->run->mmio.len = r.size;
+		vcpu->run->mmio.is_write = 1;
+		val = regs->pt.regs[r.reg];
+		switch (r.size) {
+		case 1:
+			*(u8 *)data = (u8)val;
+			kvm_debug("MMIO out %02x -> %016llx, data: %016llx\n", (unsigned)(u8)val,
+				  vcpu->run->mmio.phys_addr, *(u64*)data);
+			break;
+		case 2:
+			*(u16 *)data = (u16)val;
+			kvm_debug("MMIO out %04x -> %016llx, data: %016llx\n", (unsigned)(u16)val,
+				  vcpu->run->mmio.phys_addr, *(u64*)data);
+			break;
+		case 4:
+			*(u32 *)data = (u32)val;
+			kvm_debug("MMIO out %08x -> %016llx, data: %016llx\n", (unsigned)(u32)val,
+				  vcpu->run->mmio.phys_addr, *(u64*)data);
+			break;
+		default:
+			*(u64 *)data = val;
+			kvm_debug("MMIO out %016lx -> %016llx, data: %016llx\n", (unsigned long)val,
+				  vcpu->run->mmio.phys_addr, *(u64*)data);
+			break;
+		}
+
+		/*
+		 * For eventfd/vhost support call io_bus_write instead
+		 * of exiting to userspace.
+		 */
+		srcu_idx = srcu_read_lock(&kvm->srcu);
+		ret = kvm_io_bus_write(kvm, KVM_MMIO_BUS, address, r.size, data);
+		srcu_read_unlock(&kvm->srcu, srcu_idx);
+		if (!ret)
+			return true;
+
+	} else {
+		struct mipsvz_szreg r = mipsvz_get_load_params(insn);
+		if (r.reg < 0) {
+			kvm_err("Error: Bad insn on load emulation: %08x\n", insn);
+			mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
+		}
+		vcpu_vz->last_exit_insn = insn;
+		vcpu->run->mmio.len = r.size;
+		vcpu->run->mmio.is_write = 0;
+		kvm_debug("MMIO in %016llx ..., data: %016llx\n", vcpu->run->mmio.phys_addr,
+			  *(u64*)data);
+	}
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_MMIO);
 	/* Never Gets Here. */
 	return true;
 }
 
 /* Return true if its a mipsvz guest fault. */
-bool mipsvz_page_fault(struct pt_regs *regs, unsigned long write,
-		       unsigned long address)
+static bool mipsvz_page_fault(struct kvm_vcpu *vcpu,
+			      struct kvm_mips_vz_regs *regs,
+			      unsigned long write,
+			      unsigned long address)
 {
 	unsigned long flags;
 	pte_t *ptep, entry;
@@ -1010,9 +1256,9 @@ bool mipsvz_page_fault(struct pt_regs *regs, unsigned long write,
 	s32 idx;
 	int srcu_idx;
 	unsigned long prot_bits;
-	struct kvm_vcpu *vcpu;
 	struct kvm *kvm;
 	struct kvm_mips_vz *kvm_mips_vz;
+	struct kvm_mips_vcpu_vz *vcpu_vz = vcpu->arch.impl;
 	bool writable;
 
 	/*
@@ -1022,23 +1268,21 @@ bool mipsvz_page_fault(struct pt_regs *regs, unsigned long write,
 	if (address >= XKSSEG)
 		return false;
 
-	vcpu = current->thread.vcpu;
 	kvm = vcpu->kvm;
 	kvm_mips_vz = kvm->arch.impl;
 
-	if (address >= 0x10000000) {
-		if (address < 0x1e000000) {
-			/* mmio */
-			mipsvz_exit_vm(regs, KVM_EXIT_EXCEPTION);
-			/* Never Gets Here. */
-		} else if (address < 0x1e010000) {
+	if ((address >= KVM_MIPSVZ_IO_START) && (address < KVM_MIPSVZ_IO_END)) {
+		if (address < KVM_MIPSVZ_MMIO_END) {
+			return mipsvz_emulate_mmio(regs, write, address,
+						kvm, vcpu);
+		} else if (address < KVM_MIPSVZ_IOPORT_END) {
 			return mipsvz_emulate_io(regs, write, address,
 						 kvm, vcpu);
-		} else if (address < 0x1e020000) {
+		} else if (address < KVM_MIPSVZ_IRQCHIP_END) {
 			return mipsvz_write_irqchip(regs, write, address,
 						    kvm, vcpu);
 		} else {
-			mipsvz_exit_vm(regs, KVM_EXIT_EXCEPTION);
+			mipsvz_exit_vm(vcpu, regs, KVM_EXIT_EXCEPTION);
 			/* Never Gets Here. */
 		}
 	}
@@ -1090,7 +1334,7 @@ bool mipsvz_page_fault(struct pt_regs *regs, unsigned long write,
 	local_irq_save(flags);
 	saved_entryhi = read_c0_entryhi();
 	address &= (PAGE_MASK << 1);
-	write_c0_entryhi(address | current->thread.guest_asid);
+	write_c0_entryhi(address | vcpu_vz->guest_asid);
 	mtc0_tlbw_hazard();
 	tlb_probe();
 	tlb_probe_hazard();
@@ -1116,7 +1360,7 @@ bool mipsvz_page_fault(struct pt_regs *regs, unsigned long write,
 bad:
 	srcu_read_unlock(&kvm->srcu, srcu_idx);
 	mutex_unlock(&kvm_mips_vz->guest_mm_lock);
-	mipsvz_exit_vm(regs, KVM_EXIT_EXCEPTION);
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_EXCEPTION);
 	/* Never Gets Here. */
 	return true;
 }
@@ -1144,25 +1388,29 @@ int kvm_test_age_hva(struct kvm *kvm, unsigned long hva)
 	return 0;
 }
 
-bool  mipsvz_cp_unusable(struct pt_regs *regs)
+static void mipsvz_cp_unusable(struct kvm_vcpu *vcpu,
+			       struct kvm_mips_vz_regs *regs)
 {
-	bool r = false;
-	unsigned int cpid = (regs->cp0_cause >> CAUSEB_CE) & 3;
+	bool handled = false;
+	unsigned int cpid = (regs->pt.cp0_cause >> CAUSEB_CE) & 3;
 
+	/* This could take a while, turn interrupts back on. */
+	local_irq_enable();
 	preempt_disable();
 
 	if (cpid != 1 || !cpu_has_fpu)
 		goto out;
 
-	regs->cp0_status |= (ST0_CU1 | ST0_FR); /* Enable FPU in guest ... */
+	regs->pt.cp0_status |= (ST0_CU1 | ST0_FR); /* Enable FPU in guest ... */
 	set_c0_status(ST0_CU1 | ST0_FR);  /* ... and now so we can install its contents. */
 	enable_fpu_hazard();
-	mipsvz_install_fpu(current->thread.vcpu);
+	mipsvz_install_fpu(vcpu);
 
-	r = true;
+	handled = true;
 out:
 	preempt_enable();
-	return r;
+	if (!handled)
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 }
 
 static void mipsvz_commit_memory_region(struct kvm *kvm,
@@ -1336,16 +1584,20 @@ static int mipsvz_set_reg(struct kvm_vcpu *vcpu,
 static int mipsvz_vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
 {
 	int ret = 0;
-	int cpu;
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_mips_vz *kvm_mips_vz = kvm->arch.impl;
+	struct kvm_mips_vcpu_vz *vcpu_vz = vcpu->arch.impl;
 
-	if (kvm_run->exit_reason == KVM_EXIT_IO && kvm_run->io.direction == KVM_EXIT_IO_IN) {
-		ret = mipsvz_handle_io_in(vcpu);
-		if (unlikely(ret)) {
-			pr_warn("Error: Return from KVM_EXIT_IO with bad exit_insn state.\n");
-			return ret;
-		}
+	if ((kvm_run->exit_reason == KVM_EXIT_MMIO) &&
+	    !kvm_run->mmio.is_write)
+		ret = mipsvz_handle_io_in(vcpu, 1);
+	else if ((kvm_run->exit_reason == KVM_EXIT_IO) &&
+	      (kvm_run->io.direction == KVM_EXIT_IO_IN))
+		ret = mipsvz_handle_io_in(vcpu, 0);
+
+	if (unlikely(ret)) {
+		pr_warn("Error: Return from KVM_EXIT_IO with bad exit_insn state.\n");
+		return ret;
 	}
 
 	lose_fpu(1);
@@ -1355,30 +1607,11 @@ static int mipsvz_vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
 	WARN(irqs_disabled(), "IRQs should be on here.");
 	local_irq_disable();
 	kvm_run->exit_reason = KVM_EXIT_UNKNOWN;
-	cpu = raw_smp_processor_id();
 
-	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
 	kvm_guest_enter();
 
-	/*
-	 * Make sure the Root guest and host contexts are in the same
-	 * ASID generation
-	 */
-	if ((kvm_mips_vz->asid[cpu] ^ asid_cache(cpu)) & ASID_VERSION_MASK)
-		kvm_mips_vz->asid[cpu] = get_new_asid(cpu);
-	if ((cpu_context(cpu, current->mm) ^ asid_cache(cpu)) & ASID_VERSION_MASK)
-		drop_mmu_context(current->mm, cpu);
-	if ((kvm_mips_vz->asid[cpu] ^ asid_cache(cpu)) & ASID_VERSION_MASK)
-		kvm_mips_vz->asid[cpu] = get_new_asid(cpu);
-
-	current->thread.mm_asid = read_c0_entryhi() & ASID_MASK;
-	current->thread.guest_asid = kvm_mips_vz->asid[cpu] & ASID_MASK;
-	current->thread.vcpu = vcpu;
-
-	write_c0_entryhi(current->thread.guest_asid);
+	write_c0_entryhi(vcpu_vz->guest_asid);
 	TLBMISS_HANDLER_SETUP_PGD(kvm_mips_vz->pgd);
-
-	set_tsk_thread_flag(current, TIF_GUESTMODE);
 
 	mipsvz_start_guest(vcpu);
 
@@ -1393,28 +1626,15 @@ static int mipsvz_vcpu_run(struct kvm_vcpu *vcpu, struct kvm_run *kvm_run)
 
 	local_irq_enable();
 
-	vcpu->srcu_idx = srcu_read_lock(&vcpu->kvm->srcu);
-
-	if (signal_pending(current) && kvm_run->exit_reason == KVM_EXIT_INTR)
+	if (signal_pending(current)) {
+		kvm_run->exit_reason = KVM_EXIT_INTR;
 		ret = -EINTR;
+	}
 
 	kvm_debug("mipsvz_vcpu_run exit epc: %016lx\n", vcpu->arch.epc);
 	return ret;
 }
-#if 0
-int kvm_dev_ioctl_check_extension(long ext)
-{
-	int r = 0;
 
-	switch (ext) {
-	case KVM_CAP_IRQCHIP:
-		r = 1;
-		break;
-	}
-
-	return r;
-}
-#endif
 static int mipsvz_cpu_has_pending_timer(struct kvm_vcpu *vcpu)
 {
 	int me;
@@ -1448,7 +1668,7 @@ static int mipsvz_vcpu_runnable(struct kvm_vcpu *vcpu)
 	if (!kvm_mips_vz->irq_chip)
 		goto out;
 
-	irqchip_regs = page_address(kvm_mips_vz->irq_chip);
+	irqchip_regs = kvm_mips_vz->irq_chip->base;
 
 	spin_lock_irqsave(&kvm_mips_vz->irq_chip_lock, flags);
 	injected_ipx = vcpu_vz->injected_ipx;
@@ -1460,52 +1680,78 @@ out:
 	return r;
 }
 
-static void mipsvz_hypercall_exit_vm(struct pt_regs *regs)
+static void mipsvz_hypercall_exit_vm(struct kvm_vcpu *vcpu,
+				     struct kvm_mips_vz_regs *regs)
 {
-	mipsvz_exit_vm(regs, KVM_EXIT_SHUTDOWN);
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_SHUTDOWN);
 }
 
-static void mipsvz_hypercall_get_hpt_frequency(struct pt_regs *regs)
+static void mipsvz_hypercall_get_host_time(struct kvm_vcpu *vcpu,
+					struct kvm_mips_vz_regs *regs)
 {
-	regs->regs[2] = mips_hpt_frequency;
+	struct timespec ts;
+	u64 ns;
+
+	getrawmonotonic(&ts);
+	ns = (u64)timespec_to_ns(&ts);
+
+#ifdef CONFIG_CPU_BIG_ENDIAN
+	regs->pt.regs[2] = (s64)(s32)(ns >> 32);
+	regs->pt.regs[3] = (s64)(s32)ns;
+#else
+	regs->pt.regs[2] = (s64)(s32)ns;
+	regs->pt.regs[3] = (s64)(s32)(ns >> 32);
+#endif
+
 }
 
-typedef void (*mipsvz_hypercall_handler_t)(struct pt_regs *);
-typedef void (*mipsvz_hypervisor_handler_t)(struct pt_regs *);
-
-static const  mipsvz_hypercall_handler_t mipsvz_hypercall_handlers[] = {
-	NULL,				/* Write to console. */
-	mipsvz_hypercall_exit_vm,	/* Exit VM */
-	mipsvz_hypercall_get_hpt_frequency, /* get the mips_hpt_frequency */
-};
-
-static void mipsvz_hypercall(struct pt_regs *regs)
+static void mipsvz_hypercall_get_hpt_frequency(struct kvm_vcpu *vcpu,
+					       struct kvm_mips_vz_regs *regs)
 {
-	unsigned long call_number = regs->regs[2];
+	regs->pt.regs[2] = mips_hpt_frequency;
+}
 
-	kvm_debug("kvm_mipsvz_hypercall: %lx\n", call_number);
+typedef void (*mipsvz_hypervisor_handler_t)(struct kvm_vcpu *vcpu,
+					    struct kvm_mips_vz_regs *);
+
+static void mipsvz_hypercall(struct kvm_vcpu *vcpu,
+			     struct kvm_mips_vz_regs *regs)
+{
+	unsigned long nr = regs->pt.regs[2];
+	struct kvm_run *kvm_run;
+	int i;
+
+	kvm_debug("kvm_mipsvz_hypercall: %lx\n", nr);
 
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on hypercall\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
-	if (call_number >= ARRAY_SIZE(mipsvz_hypercall_handlers) ||
-	    !mipsvz_hypercall_handlers[call_number]) {
-		struct kvm_vcpu *vcpu = current->thread.vcpu;
-		struct kvm_run *kvm_run = vcpu->run;
-		int i;
-
-		kvm_run->hypercall.nr = call_number;
+	switch(nr) {
+	case KVM_HC_MIPS_CONSOLE_OUTPUT:
+		kvm_run = vcpu->run;
+		kvm_run->hypercall.nr = nr;
 		for (i = 0; i < ARRAY_SIZE(kvm_run->hypercall.args); i++)
-			kvm_run->hypercall.args[i] = regs->regs[4 + i];
-		mipsvz_exit_vm(regs, KVM_EXIT_HYPERCALL);
-	} else {
-		mipsvz_hypercall_handlers[call_number](regs);
+			kvm_run->hypercall.args[i] = regs->pt.regs[4 + i];
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_HYPERCALL);
+		break;
+	case KVM_HC_MIPS_GET_HOST_TIME:
+		mipsvz_hypercall_get_host_time(vcpu, regs);
+		break;
+	case KVM_HC_MIPS_GET_CLOCK_FREQ:
+		mipsvz_hypercall_get_hpt_frequency(vcpu, regs);
+		break;
+	case KVM_HC_MIPS_EXIT_VM:
+		mipsvz_hypercall_exit_vm(vcpu, regs);
+		break;
+	default:
+		/* hypercall not implemented */
+		break;
 	}
 }
 
-static void mipsvz_sfce(struct pt_regs *regs)
+static void mipsvz_sfce(struct kvm_vcpu *vcpu, struct kvm_mips_vz_regs *regs)
 {
 	bool is_64bit;
 	int rt, rd, sel;
@@ -1515,12 +1761,12 @@ static void mipsvz_sfce(struct pt_regs *regs)
 
 	if ((insn & 0xffc007f8) != 0x40800000) {
 		kvm_err("Error: SFCE not on DMTC0/MTC0.\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 	/* Move past the DMTC0/MTC0 insn */
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on SFCE\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
 	is_64bit = insn & (1 << 21);
@@ -1528,7 +1774,7 @@ static void mipsvz_sfce(struct pt_regs *regs)
 	rd = (insn >> 11) & 0x1f;
 	sel = insn & 7;
 
-	rt_val = rt ? regs->regs[rt] : 0;
+	rt_val = rt ? regs->pt.regs[rt] : 0;
 
 	switch ((rd << 3) | sel) {
 	case 0x60: /* Status */
@@ -1546,12 +1792,13 @@ static void mipsvz_sfce(struct pt_regs *regs)
 		break;
 	default:
 		kvm_err("Error: SFCE unknown target reg.\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 		break;
 	}
 }
 
-static void mipsvz_handle_cache(struct pt_regs *regs,
+static void mipsvz_handle_cache(struct kvm_vcpu *vcpu,
+				struct kvm_mips_vz_regs *regs,
 				union mips_instruction insn)
 {
 	s64 ea;
@@ -1560,7 +1807,7 @@ static void mipsvz_handle_cache(struct pt_regs *regs,
 	/* Move past the CACHE insn */
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on CACHE GPSI\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
 	offset = insn.c_format.simmediate;
@@ -1569,11 +1816,11 @@ static void mipsvz_handle_cache(struct pt_regs *regs,
 	case 0: /* Primary Instruction */
 		switch (insn.c_format.c_op) {
 		case 0: /* Index Invalidate */
-			ea = regs->regs[insn.c_format.rs] + offset;
+			ea = regs->pt.regs[insn.c_format.rs] + offset;
 			asm volatile("cache	0x00,0(%0)" : : "d" (ea));
 			break;
 		case 4: /* ICache invalidate EA */
-			ea = regs->regs[insn.c_format.rs] + offset;
+			ea = regs->pt.regs[insn.c_format.rs] + offset;
 			asm volatile("synci	0($0)");
 			break;
 		default:
@@ -1605,22 +1852,21 @@ static void mipsvz_handle_cache(struct pt_regs *regs,
 	return;
 cannot_handle:
 		kvm_err("Error: GPSI Illegal cache op %08x\n", insn.word);
-		mipsvz_exit_vm(regs, KVM_EXIT_EXCEPTION);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_EXCEPTION);
 }
 
-static void mipsvz_handle_wait(struct pt_regs *regs)
+static void mipsvz_handle_wait(struct kvm_vcpu *vcpu,
+			       struct kvm_mips_vz_regs *regs)
 {
 	struct kvm_mips_vcpu_vz *vcpu_vz;
-	struct kvm_vcpu *vcpu;
 
 	/* Move past the WAIT insn */
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on WAIT GPSI\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
 	preempt_disable();
-	vcpu = current->thread.vcpu;
 	vcpu_vz = vcpu->arch.impl;
 	mipsvz_readout_cp0_counter_state(vcpu_vz);
 	if ((vcpu_vz->c0_cause & CAUSEF_TI) == 0) {
@@ -1633,35 +1879,34 @@ static void mipsvz_handle_wait(struct pt_regs *regs)
 	}
 	preempt_enable();
 
-	kvm_vcpu_block(current->thread.vcpu);
+	kvm_vcpu_block(vcpu);
 
 	if (signal_pending(current))
-			mipsvz_exit_vm(regs, KVM_EXIT_INTR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTR);
 }
 
-static void mipsvz_handle_gpsi_mtc0(struct pt_regs *regs,
+static void mipsvz_handle_gpsi_mtc0(struct kvm_vcpu *vcpu,
+				    struct kvm_mips_vz_regs *regs,
 				    union mips_instruction insn)
 {
 	struct kvm_mips_vcpu_vz *vcpu_vz;
-	struct kvm_vcpu *vcpu;
 	u32 val;
 	u32 offset;
 
 	/* Move past the MTC0 insn */
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on MTC0 GPSI\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
 	preempt_disable();
-	vcpu = current->thread.vcpu;
 	vcpu_vz = vcpu->arch.impl;
 	switch (insn.c0m_format.rd) {
 	case 9:
 		if (insn.c0m_format.sel != 0)
 			goto bad_reg;
 		/* Count */
-		val = regs->regs[insn.c0m_format.rt];
+		val = regs->pt.regs[insn.c0m_format.rt];
 		offset = val - read_gc0_count();
 		vcpu_vz->c0_count_offset += offset;
 		/* write_c0_gtoffset(mipsvz_cp0_count_offset[vcpu->cpu] + vcpu_vz->c0_count_offset); */
@@ -1676,17 +1921,18 @@ static void mipsvz_handle_gpsi_mtc0(struct pt_regs *regs,
 bad_reg:
 	kvm_err("Error: Bad Reg($%d,%d) on MTC0 GPSI\n",
 		insn.c0m_format.rd, insn.c0m_format.sel);
-	mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 
 }
 
-static void mipsvz_handle_gpsi_mfc0(struct pt_regs *regs,
+static void mipsvz_handle_gpsi_mfc0(struct kvm_vcpu *vcpu,
+				    struct kvm_mips_vz_regs *regs,
 				    union mips_instruction insn)
 {
 	/* Move past the MFC0 insn */
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on MFC0 GPSI\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
 	switch (insn.c0m_format.rd) {
@@ -1694,13 +1940,19 @@ static void mipsvz_handle_gpsi_mfc0(struct pt_regs *regs,
 		if (insn.c0m_format.sel != 2)
 			goto bad_reg;
 		/* SRSCtl */
-		regs->regs[insn.c0m_format.rt] = 0;
+		regs->pt.regs[insn.c0m_format.rt] = 0;
 		break;
 	case 15:
 		if (insn.c0m_format.sel != 0)
 			goto bad_reg;
 		/* PRId */
-		regs->regs[insn.c0m_format.rt] = (s64)read_c0_prid();
+		regs->pt.regs[insn.c0m_format.rt] = (s64)read_c0_prid();
+		break;
+	case 26:
+		if (insn.c0m_format.sel != 0)
+			goto bad_reg;
+		/* ErrCtl */
+		regs->pt.regs[insn.c0m_format.rt] = 0;
 		break;
 	default:
 		goto bad_reg;
@@ -1708,27 +1960,27 @@ static void mipsvz_handle_gpsi_mfc0(struct pt_regs *regs,
 	return;
 
 bad_reg:
-	kvm_err("Error: Bad Reg($%d,%d) on MTC0 GPSI\n",
+	kvm_err("Error: Bad Reg($%d,%d) on MFC0 GPSI\n",
 		insn.c0m_format.rd, insn.c0m_format.sel);
-	mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
-
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 }
 
-static void mipsvz_handle_gpsi_dmfc0(struct pt_regs *regs,
+static void mipsvz_handle_gpsi_dmfc0(struct kvm_vcpu *vcpu,
+				     struct kvm_mips_vz_regs *regs,
 				     union mips_instruction insn)
 {
 	/* Move past the DMFC0 insn */
 	if (mipsvz_compute_return_epc(regs)) {
 		kvm_err("Error: Bad EPC on DMFC0 GPSI\n");
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 
 	switch (insn.c0m_format.rd) {
 	case 26:
-		if (insn.c0m_format.sel != 2)
+		if (insn.c0m_format.sel != 0)
 			goto bad_reg;
 		/* ErrCtl */
-		regs->regs[insn.c0m_format.rt] = 0;
+		regs->pt.regs[insn.c0m_format.rt] = 0;
 		break;
 	default:
 		goto bad_reg;
@@ -1736,50 +1988,50 @@ static void mipsvz_handle_gpsi_dmfc0(struct pt_regs *regs,
 	return;
 
 bad_reg:
-	kvm_err("Error: Bad Reg($%d,%d) on DMTC0 GPSI\n",
+	kvm_err("Error: Bad Reg($%d,%d) on DMFC0 GPSI\n",
 		insn.c0m_format.rd, insn.c0m_format.sel);
-	mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
-
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 }
 
-static void mipsvz_gpsi(struct pt_regs *regs)
+static void mipsvz_gpsi(struct kvm_vcpu *vcpu, struct kvm_mips_vz_regs *regs)
 {
 	union mips_instruction insn;
 
 	insn.word = regs->cp0_badinstr;
 
 	if (insn.c_format.opcode == cache_op)
-		mipsvz_handle_cache(regs, insn);
+		mipsvz_handle_cache(vcpu, regs, insn);
 	else if (insn.c0_format.opcode == cop0_op &&
 		 insn.c0_format.co == 1 &&
 		 insn.c0_format.func == wait_op)
-		mipsvz_handle_wait(regs);
+		mipsvz_handle_wait(vcpu, regs);
 	else if (insn.c0m_format.opcode == cop0_op &&
 		 insn.c0m_format.func == mtc_op &&
 		 insn.c0m_format.code == 0)
-		mipsvz_handle_gpsi_mtc0(regs, insn);
+		mipsvz_handle_gpsi_mtc0(vcpu, regs, insn);
 	else if (insn.c0m_format.opcode == cop0_op &&
 		 insn.c0m_format.func == mfc_op &&
 		 insn.c0m_format.code == 0)
-		mipsvz_handle_gpsi_mfc0(regs, insn);
+		mipsvz_handle_gpsi_mfc0(vcpu, regs, insn);
 	else if (insn.c0m_format.opcode == cop0_op &&
 		 insn.c0m_format.func == dmfc_op &&
 		 insn.c0m_format.code == 0)
-		mipsvz_handle_gpsi_dmfc0(regs, insn);
+		mipsvz_handle_gpsi_dmfc0(vcpu, regs, insn);
 	else {
 		kvm_err("Error: GPSI not on CACHE, WAIT, MFC0 or MTC0: %08x\n",
 			insn.word);
-		mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 	}
 }
 
-static void mipsvz_default_ex(struct pt_regs *regs)
+static void mipsvz_default_ex(struct kvm_vcpu *vcpu,
+			      struct kvm_mips_vz_regs *regs)
 {
 	u32 guestctl0 = read_c0_guestctl0();
 	int gexc_code = (guestctl0 >> 2) & 0x1f;
 
 	kvm_err("Hypervisor Exception (%d): Not handled yet\n", gexc_code);
-	mipsvz_exit_vm(regs, KVM_EXIT_INTERNAL_ERROR);
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
 }
 
 #define mipsvz_gva mipsvz_default_ex
@@ -1824,7 +2076,8 @@ static const mipsvz_hypervisor_handler_t mipsvz_hypervisor_handlers[] = {
 /*
  * Hypervisor Exception handler, called with interrupts disabled.
  */
-asmlinkage void do_hypervisor(struct pt_regs *regs)
+asmlinkage void mipsvz_do_hypervisor(struct kvm_vcpu *vcpu,
+				     struct kvm_mips_vz_regs *regs)
 {
 	int gexc_code;
 	u32 guestctl0 = read_c0_guestctl0();
@@ -1838,7 +2091,55 @@ asmlinkage void do_hypervisor(struct pt_regs *regs)
 
 	gexc_code = (guestctl0 >> 2) & 0x1f;
 
-	mipsvz_hypervisor_handlers[gexc_code](regs);
+	mipsvz_hypervisor_handlers[gexc_code](vcpu, regs);
+}
+
+asmlinkage void mipsvz_do_tlbs(struct kvm_vcpu *vcpu,
+			       struct kvm_mips_vz_regs *regs)
+{
+	unsigned long addr = read_c0_badvaddr();
+
+	/* Must read before any exceptions can happen. */
+	regs->cp0_badinstr = read_c0_badinstr();
+	regs->cp0_badinstrp = read_c0_badinstrp();
+
+	/* This could take a while, turn interrupts back on. */
+	local_irq_enable();
+
+	mipsvz_page_fault(vcpu, regs, 1, addr);
+}
+
+asmlinkage void mipsvz_do_tlbl(struct kvm_vcpu *vcpu,
+			       struct kvm_mips_vz_regs *regs)
+{
+	unsigned long addr = read_c0_badvaddr();
+
+	/* Must read before any exceptions can happen. */
+	regs->cp0_badinstr = read_c0_badinstr();
+	regs->cp0_badinstrp = read_c0_badinstrp();
+
+	/* This could take a while, turn interrupts back on. */
+	local_irq_enable();
+
+	mipsvz_page_fault(vcpu, regs, 0, addr);
+}
+
+asmlinkage void mipsvz_do_unimp(struct kvm_vcpu *vcpu,
+				struct kvm_mips_vz_regs *regs)
+{
+	/* This could take a while, turn interrupts back on. */
+	local_irq_enable();
+
+	mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTERNAL_ERROR);
+}
+
+asmlinkage void mipsvz_do_resched(struct kvm_vcpu *vcpu,
+				  struct kvm_mips_vz_regs *regs)
+{
+	/* irqs already enabled here. */
+	cond_resched();
+	if (signal_pending(current))
+		mipsvz_exit_vm(vcpu, regs, KVM_EXIT_INTR);
 }
 
 static long mipsvz_vcpu_ioctl(struct kvm_vcpu *vcpu, unsigned int ioctl,
@@ -1846,6 +2147,44 @@ static long mipsvz_vcpu_ioctl(struct kvm_vcpu *vcpu, unsigned int ioctl,
 {
 	return -ENOIOCTLCMD;
 }
+
+typedef void (*vz_ex_handler_t)(struct kvm_vcpu *vcpu,
+				struct kvm_mips_vz_regs *regs);
+
+vz_ex_handler_t vz_ex_handlers[32] = {
+	NULL,			/* 0  - irq (handled in asm code) */
+	mipsvz_do_tlbs,		/* 1  - TLB Mod */
+	mipsvz_do_tlbl,		/* 2  - TLB Load */
+	mipsvz_do_tlbs,		/* 3  - TLB Store */
+	mipsvz_do_unimp,	/* 4  - ADE Load */
+	mipsvz_do_unimp,	/* 5  - ADE Store */
+	mipsvz_do_unimp,	/* 6  - Bus Error I */
+	mipsvz_do_unimp,	/* 7  - Bus Error D */
+	mipsvz_do_unimp,	/* 8  - Scall */
+	mipsvz_do_unimp,	/* 9  - BP */
+	mipsvz_do_unimp,	/* 10 - RI */
+	mipsvz_cp_unusable,	/* 11 - CP Unusable */
+	mipsvz_do_unimp,	/* 12 - Overflow */
+	mipsvz_do_unimp,	/* 13 - Trap */
+	mipsvz_do_unimp,	/* 14 - MSA FPE */
+	mipsvz_do_unimp,	/* 15 - FPE */
+	mipsvz_do_unimp,	/* 16 - Implementation Defined */
+	mipsvz_do_unimp,	/* 17 - Implementation Defined */
+	mipsvz_do_unimp,	/* 18 - CP2 */
+	mipsvz_do_unimp,	/* 19 - TLB RI */
+	mipsvz_do_unimp,	/* 20 - TLB XI */
+	mipsvz_do_unimp,	/* 21 - MSA Dis */
+	mipsvz_do_unimp,	/* 22 - MDMX */
+	mipsvz_do_unimp,	/* 23 - Watch */
+	mipsvz_do_unimp,	/* 24 - MCheck */
+	mipsvz_do_unimp,	/* 25 - Thread */
+	mipsvz_do_unimp,	/* 26 - Scall */
+	mipsvz_do_hypervisor,	/* 27 - Guest Exception */
+	mipsvz_do_unimp,	/* 28 - Reserved */
+	mipsvz_do_unimp,	/* 29 - Reserved */
+	mipsvz_do_unimp,	/* 30 - Cache Error */
+	mipsvz_do_unimp		/* 31 - Reserved */
+};
 
 static const struct kvm_mips_ops kvm_mips_vz_ops = {
 	.vcpu_runnable = mipsvz_vcpu_runnable,
@@ -1891,8 +2230,6 @@ int mipsvz_init_vm(struct kvm *kvm, unsigned long type)
 	pgd_init((unsigned long)kvm_mips_vz->pgd);
 
 	spin_lock_init(&kvm_mips_vz->irq_chip_lock);
-
-	set_except_vector(27, handle_hypervisor);
 
 	return 0;
 err:

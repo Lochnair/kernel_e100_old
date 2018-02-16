@@ -5,6 +5,7 @@
 #include "kvm/virtio-mmio.h"
 
 #include "arm-common/gic.h"
+#include "arm-common/pci.h"
 
 #include <stdbool.h>
 
@@ -41,28 +42,46 @@ static void dump_fdt(const char *dtb_file, void *fdt)
 	close(fd);
 }
 
-#define DEVICE_NAME_MAX_LEN 32
-static void generate_virtio_mmio_node(void *fdt, struct virtio_mmio *vmmio)
+#define CPU_NAME_MAX_LEN 8
+static void generate_cpu_nodes(void *fdt, struct kvm *kvm)
 {
-	char dev_name[DEVICE_NAME_MAX_LEN];
-	u64 addr = vmmio->addr;
-	u64 reg_prop[] = {
-		cpu_to_fdt64(addr),
-		cpu_to_fdt64(VIRTIO_MMIO_IO_SIZE)
-	};
+	int cpu;
+
+	_FDT(fdt_begin_node(fdt, "cpus"));
+	_FDT(fdt_property_cell(fdt, "#address-cells", 0x1));
+	_FDT(fdt_property_cell(fdt, "#size-cells", 0x0));
+
+	for (cpu = 0; cpu < kvm->nrcpus; ++cpu) {
+		char cpu_name[CPU_NAME_MAX_LEN];
+		struct kvm_cpu *vcpu = kvm->cpus[cpu];
+		unsigned long mpidr = kvm_cpu__get_vcpu_mpidr(vcpu);
+
+		mpidr &= ARM_MPIDR_HWID_BITMASK;
+		snprintf(cpu_name, CPU_NAME_MAX_LEN, "cpu@%lx", mpidr);
+
+		_FDT(fdt_begin_node(fdt, cpu_name));
+		_FDT(fdt_property_string(fdt, "device_type", "cpu"));
+		_FDT(fdt_property_string(fdt, "compatible", vcpu->cpu_compatible));
+
+		if (kvm->nrcpus > 1)
+			_FDT(fdt_property_string(fdt, "enable-method", "psci"));
+
+		_FDT(fdt_property_cell(fdt, "reg", mpidr));
+		_FDT(fdt_end_node(fdt));
+	}
+
+	_FDT(fdt_end_node(fdt));
+}
+
+static void generate_irq_prop(void *fdt, u8 irq)
+{
 	u32 irq_prop[] = {
 		cpu_to_fdt32(GIC_FDT_IRQ_TYPE_SPI),
-		cpu_to_fdt32(vmmio->irq - GIC_SPI_IRQ_BASE),
+		cpu_to_fdt32(irq - GIC_SPI_IRQ_BASE),
 		cpu_to_fdt32(GIC_FDT_IRQ_FLAGS_EDGE_LO_HI),
 	};
 
-	snprintf(dev_name, DEVICE_NAME_MAX_LEN, "virtio@%llx", addr);
-
-	_FDT(fdt_begin_node(fdt, dev_name));
-	_FDT(fdt_property_string(fdt, "compatible", "virtio,mmio"));
-	_FDT(fdt_property(fdt, "reg", reg_prop, sizeof(reg_prop)));
 	_FDT(fdt_property(fdt, "interrupts", irq_prop, sizeof(irq_prop)));
-	_FDT(fdt_end_node(fdt));
 }
 
 static int setup_fdt(struct kvm *kvm)
@@ -77,8 +96,10 @@ static int setup_fdt(struct kvm *kvm)
 	void *fdt		= staging_fdt;
 	void *fdt_dest		= guest_flat_to_host(kvm,
 						     kvm->arch.dtb_guest_start);
-	void (*generate_cpu_nodes)(void *, struct kvm *, u32)
-				= kvm->cpus[0]->generate_fdt_nodes;
+	void (*generate_mmio_fdt_nodes)(void *, struct device_header *,
+					void (*)(void *, u8));
+	void (*generate_cpu_peripheral_fdt_nodes)(void *, struct kvm *, u32)
+					= kvm->cpus[0]->generate_fdt_nodes;
 
 	/* Create new tree without a reserve map */
 	_FDT(fdt_create(fdt, FDT_MAX_SIZE));
@@ -93,6 +114,7 @@ static int setup_fdt(struct kvm *kvm)
 
 	/* /chosen */
 	_FDT(fdt_begin_node(fdt, "chosen"));
+	_FDT(fdt_property_cell(fdt, "linux,pci-probe-only", 1));
 	_FDT(fdt_property_string(fdt, "bootargs", kern_cmdline));
 
 	/* Initrd */
@@ -115,15 +137,28 @@ static int setup_fdt(struct kvm *kvm)
 	_FDT(fdt_end_node(fdt));
 
 	/* CPU and peripherals (interrupt controller, timers, etc) */
-	if (generate_cpu_nodes)
-		generate_cpu_nodes(fdt, kvm, gic_phandle);
+	generate_cpu_nodes(fdt, kvm);
+	if (generate_cpu_peripheral_fdt_nodes)
+		generate_cpu_peripheral_fdt_nodes(fdt, kvm, gic_phandle);
 
 	/* Virtio MMIO devices */
 	dev_hdr = device__first_dev(DEVICE_BUS_MMIO);
 	while (dev_hdr) {
-		generate_virtio_mmio_node(fdt, dev_hdr->data);
+		generate_mmio_fdt_nodes = dev_hdr->data;
+		generate_mmio_fdt_nodes(fdt, dev_hdr, generate_irq_prop);
 		dev_hdr = device__next_dev(dev_hdr);
 	}
+
+	/* IOPORT devices (!) */
+	dev_hdr = device__first_dev(DEVICE_BUS_IOPORT);
+	while (dev_hdr) {
+		generate_mmio_fdt_nodes = dev_hdr->data;
+		generate_mmio_fdt_nodes(fdt, dev_hdr, generate_irq_prop);
+		dev_hdr = device__next_dev(dev_hdr);
+	}
+
+	/* PCI host controller */
+	pci__generate_fdt_nodes(fdt, gic_phandle);
 
 	/* PSCI firmware */
 	_FDT(fdt_begin_node(fdt, "psci"));
@@ -240,11 +275,4 @@ int load_flat_binary(struct kvm *kvm, int fd_kernel, int fd_initrd,
 	kern_cmdline[COMMAND_LINE_SIZE - 1] = '\0';
 
 	return true;
-}
-
-bool load_bzimage(struct kvm *kvm, int fd_kernel, int fd_initrd,
-		  const char *kernel_cmdline)
-{
-	/* To b or not to b? That is the zImage. */
-	return false;
 }
