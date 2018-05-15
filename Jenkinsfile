@@ -52,7 +52,7 @@ pipeline {
                     
                     cp -t "${extPath}/arch/mips" -a arch/mips/include
                     
-                    find . -name Kconfig\* -exec install -Dm644 {} "${extPath}/{}" \;
+                    find . -name 'Kconfig*' -exec install -Dm644 {} "${extPath}/{}" \;
                     
                     install -Dt "${extPath}/tools/objtool" tools/objtool/objtool
                     
