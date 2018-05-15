@@ -17,7 +17,7 @@ pipeline {
                 script { 
                     def extWorkspace = exwsAllocate 'diskpool1'
                     def extPath = extWorkspace.getCompleteWorkspacePath()
-                    sh 'ls -l ${extPath}'
+                    sh "ls -l ${extPath}"
                 }
             }
         }
