@@ -38,7 +38,9 @@ pipeline {
                 script { 
                     def extWorkspace = exwsAllocate 'diskpool1'
                     def extPath = extWorkspace.getCompleteWorkspacePath()
-                    sh """
+                }
+                
+                sh """
                     mkdir -p ${extPath}"
                     install -Dt "${extPath}" -m644 Makefile .config Module.symvers
                     install -Dt "${extPath}/kernel" -m644 kernel/Makefile
@@ -58,7 +60,6 @@ pipeline {
                     
                     find -L "${extPath}" -type l -printf 'Removing %P\n' -delete
                     """
-                }
             }
         }
     }
