@@ -37,7 +37,10 @@ pipeline {
             steps {
                 script { 
                     def extWorkspace = exwsAllocate 'diskpool1'
-                    def extPath = extWorkspace.getCompleteWorkspacePath()
+                }
+                
+                environment {
+                    EXWS_PATH = extWorkspace.getCompleteWorkspacePath()
                 }
                 
                 sh """
@@ -63,4 +66,8 @@ pipeline {
             }
         }
     }
+}
+
+node {
+    
 }
