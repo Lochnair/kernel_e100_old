@@ -16,9 +16,10 @@ pipeline {
             steps {
                 script { 
                     def extWorkspace = exwsAllocate 'diskpool1'
-                    extWorkspace.getCompleteWorkspacePath()
+                    def extPath = extWorkspace.getCompleteWorkspacePath()
                 }
-                sh 'export'
+                
+                sh 'ls -l ${extPath}'
             }
         }
     }
