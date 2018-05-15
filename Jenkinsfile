@@ -14,7 +14,8 @@ pipeline {
         stage('Prepare for out-of-tree builds') {
             
             steps {
-                def extWorkspace = exwsAllocate 'pool1'
+                script { def extWorkspace = exwsAllocate 'pool1'
+                       }
                 sh 'export'
             }
         }
