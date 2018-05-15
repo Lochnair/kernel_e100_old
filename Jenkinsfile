@@ -1,5 +1,5 @@
 node {
-	docker.image('lochnair/octeon-buildenv:latest') {
+	docker.image('lochnair/octeon-buildenv:latest').inside {
 		stage 'Clean workspace'
 
 		sh 'git reset --hard'
