@@ -2,8 +2,6 @@ pipeline {
     agent {
         docker { image 'lochnair/octeon-buildenv:latest' }
     }
-
-    def extWorkspace = exwsAllocate 'diskpool1'
     
     stages {
         stage('Clean') {
@@ -36,6 +34,7 @@ pipeline {
         }
         
         stage('Prepare for out-of-tree builds') {
+            def extWorkspace = exwsAllocate 'diskpool1'
             steps {
                 environment {
                     EXWS_PATH = extWorkspace.getCompleteWorkspacePath()
