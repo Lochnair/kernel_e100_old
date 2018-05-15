@@ -36,35 +36,27 @@ pipeline {
         stage('Prepare for out-of-tree builds') {
             def extWorkspace = exwsAllocate 'diskpool1'
             steps {
-                environment {
-                    EXWS_PATH = extWorkspace.getCompleteWorkspacePath()
-                }
-                
                 sh """
-                    mkdir -p ${extPath}"
-                    install -Dt "${extPath}" -m644 Makefile .config Module.symvers
-                    install -Dt "${extPath}/kernel" -m644 kernel/Makefile
+                    mkdir -p "${extWorkspace.getCompleteWorkspacePath()}"
+                    install -Dt "${extWorkspace.getCompleteWorkspacePath()}" -m644 Makefile .config Module.symvers
+                    install -Dt "${extWorkspace.getCompleteWorkspacePath()}"/kernel -m644 kernel/Makefile
                     
-                    mkdir "${extPath}/.tmp_versions"
+                    mkdir "${extWorkspace.getCompleteWorkspacePath()}"/.tmp_versions
                     
-                    cp -t "${extPath}" -a include scripts
+                    cp -t "${extWorkspace.getCompleteWorkspacePath()}" -a include scripts
                     
-                    install -Dt "${extPath}/arch/mips" -m644 arch/mips/Makefile
-                    install -Dt "${extPath}/arch/mips/kernel" -m644 arch/mips/kernel/asm-offsets.s
+                    install -Dt "${extWorkspace.getCompleteWorkspacePath()}"/arch/mips -m644 arch/mips/Makefile
+                    install -Dt "${extWorkspace.getCompleteWorkspacePath()}"/arch/mips/kernel -m644 arch/mips/kernel/asm-offsets.s
                     
-                    cp -t "${extPath}/arch/mips" -a arch/mips/include
+                    cp -t "${extWorkspace.getCompleteWorkspacePath()}"/arch/mips -a arch/mips/include
                     
-                    find . -name 'Kconfig*' -exec install -Dm644 {} "${extPath}/{}" '\';
+                    find . -name 'Kconfig*' -exec install -Dm644 {} "${extWorkspace.getCompleteWorkspacePath()}/{}" '\';
                     
-                    install -Dt "${extPath}/tools/objtool" tools/objtool/objtool
+                    install -Dt "${extWorkspace.getCompleteWorkspacePath()}"/tools/objtool tools/objtool/objtool
                     
-                    find -L "${extPath}" -type l -printf 'Removing %P\n' -delete
+                    find -L "${extWorkspace.getCompleteWorkspacePath()}" -type l -printf 'Removing %P\n' -delete
                     """
             }
         }
     }
-}
-
-node {
-    
 }
