@@ -71,6 +71,10 @@
 #include <net/tcp.h>
 #include <net/flow_dissector.h>
 
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
+#include <net/netfilter/nf_conntrack_core.h>
+#endif
+
 #define CAKE_SET_WAYS (8)
 #define CAKE_MAX_TINS (8)
 #define CAKE_QUEUES (1024)
@@ -516,6 +520,60 @@ static bool cobalt_should_drop(struct cobalt_vars *vars,
 	return drop;
 }
 
+#if IS_REACHABLE(CONFIG_NF_CONNTRACK)
+static void cake_update_flowkeys(struct flow_keys *keys,
+				 const struct sk_buff *skb)
+{
+	const struct nf_conntrack_tuple *tuple;
+	enum ip_conntrack_info ctinfo;
+	struct nf_conn *ct;
+	bool rev = false;
+
+	if (tc_skb_protocol(skb) != htons(ETH_P_IP))
+		return;
+
+	ct = nf_ct_get(skb, &ctinfo);
+	if (ct) {
+		tuple = nf_ct_tuple(ct, CTINFO2DIR(ctinfo));
+	} else {
+		const struct nf_conntrack_tuple_hash *hash;
+		struct nf_conntrack_tuple srctuple;
+
+		if (!nf_ct_get_tuplepr(skb, skb_network_offset(skb),
+				       NFPROTO_IPV4, dev_net(skb->dev),
+				       &srctuple))
+			return;
+		hash = nf_conntrack_find_get(dev_net(skb->dev),
+					     &nf_ct_zone_dflt,
+					     &srctuple);
+
+		if (!hash)
+			return;
+
+		rev = true;
+		ct = nf_ct_tuplehash_to_ctrack(hash);
+		tuple = nf_ct_tuple(ct, !hash->tuple.dst.dir);
+
+		keys->addrs.v4addrs.src = rev ? tuple->dst.u3.ip : tuple->src.u3.ip;
+		keys->addrs.v4addrs.dst = rev ? tuple->src.u3.ip : tuple->dst.u3.ip;
+
+		if (keys->ports.ports) {
+			keys->ports.src = rev ? tuple->dst.u.all : tuple->src.u.all;
+			keys->ports.dst = rev ? tuple->src.u.all : tuple->dst.u.all;
+		}
+
+		if (rev)
+			nf_ct_put(ct);
+	}
+}
+#else
+static void cake_update_flowkeys(struct flow_keys *keys,
+				 const struct sk_buff *skb)
+{
+	/* There is nothing we can do here without CONNTRACK */
+}
+#endif
+
 /* Cake has several subtle multiple bit settings. In these cases you
  *  would be matching triple isolate mode as well.
  */
@@ -542,6 +600,9 @@ static u32 cake_hash(struct cake_tin_data *q, const struct sk_buff *skb,
 
 	skb_flow_dissect_flow_keys(skb, &keys,
 				   FLOW_DISSECTOR_F_STOP_AT_FLOW_LABEL);
+
+	if (flow_mode & CAKE_FLOW_NAT_FLAG)
+		cake_update_flowkeys(&keys, skb);
 
 	/* flow_hash_from_keys() sorts the addresses by value, so we have
 	 * to preserve their order in a separate data structure to treat
@@ -1938,12 +1999,23 @@ static int cake_change(struct Qdisc *sch, struct nlattr *opt)
 	if (err < 0)
 		return err;
 
+	if (tb[TCA_CAKE_NAT]) {
+#if IS_ENABLED(CONFIG_NF_CONNTRACK)
+		q->flow_mode &= ~CAKE_FLOW_NAT_FLAG;
+		q->flow_mode |= CAKE_FLOW_NAT_FLAG *
+			!!nla_get_u32(tb[TCA_CAKE_NAT]);
+#else
+		return -EOPNOTSUPP;
+#endif
+	}
+
 	if (tb[TCA_CAKE_BASE_RATE64])
 		q->rate_bps = nla_get_u64(tb[TCA_CAKE_BASE_RATE64]);
 
 	if (tb[TCA_CAKE_FLOW_MODE])
-		q->flow_mode = (nla_get_u32(tb[TCA_CAKE_FLOW_MODE]) &
-				CAKE_FLOW_MASK);
+		q->flow_mode = ((q->flow_mode & CAKE_FLOW_NAT_FLAG) |
+				(nla_get_u32(tb[TCA_CAKE_FLOW_MODE]) &
+					CAKE_FLOW_MASK));
 
 	if (tb[TCA_CAKE_RTT]) {
 		q->interval = nla_get_u32(tb[TCA_CAKE_RTT]);
@@ -2107,6 +2179,10 @@ static int cake_dump(struct Qdisc *sch, struct sk_buff *skb)
 		goto nla_put_failure;
 
 	if (nla_put_u32(skb, TCA_CAKE_ACK_FILTER, q->ack_filter))
+		goto nla_put_failure;
+
+	if (nla_put_u32(skb, TCA_CAKE_NAT,
+			!!(q->flow_mode & CAKE_FLOW_NAT_FLAG)))
 		goto nla_put_failure;
 
 	return nla_nest_end(skb, opts);
