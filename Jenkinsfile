@@ -1,6 +1,6 @@
 pipeline {
     agent {
-        docker { image 'lochnair/octeon-buildenv:latest' }
+        docker { image 'lochnair/mips64-buildenv:latest' }
     }
 
     stages {
@@ -13,7 +13,7 @@ pipeline {
 
         stage('Prepare for out-of-tree builds') {
             steps {
-                sh 'make -j5 ARCH=mips CROSS_COMPILE=mips64-octeon-linux- prepare modules_prepare'
+                sh 'make -j5 ARCH=mips CROSS_COMPILE=mips64-linux-musl- prepare modules_prepare'
                 sh 'rm -rf tmp && mkdir tmp'
                 sh 'tar --exclude-vcs --exclude=tmp -cf tmp/e100-ksrc.tar .'
                 sh 'mv tmp/e100-ksrc.tar e100-ksrc.tar'
@@ -22,7 +22,7 @@ pipeline {
 
         stage('Build') {
             steps {
-                sh 'make -j5 ARCH=mips CROSS_COMPILE=mips64-octeon-linux- vmlinux modules'
+                sh 'make -j5 ARCH=mips CROSS_COMPILE=mips64-linux-musl- vmlinux modules'
             }
         }
         
@@ -36,7 +36,7 @@ pipeline {
         
         stage('Archive kernel modules') {
             steps {
-                sh 'make ARCH=mips CROSS_COMPILE=mips64-octeon-linux- INSTALL_MOD_PATH=destdir modules_install'
+                sh 'make ARCH=mips CROSS_COMPILE=mips64-linux-musl- INSTALL_MOD_PATH=destdir modules_install'
                 sh 'tar cvjf e100-modules.tar.bz2 -C destdir .'
                 archiveArtifacts artifacts: 'e100-modules.tar.bz2', fingerprint: true, onlyIfSuccessful: true
             }
