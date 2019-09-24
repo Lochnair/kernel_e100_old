@@ -1,0 +1,22 @@
+--- net/core/sock.c
++++ net/core/sock.c
+@@ -138,6 +138,11 @@
+ 
+ #include <trace/events/sock.h>
+ 
++#ifdef CONFIG_MPTCP
++#include <net/mptcp.h>
++#include <net/inet_common.h>
++#endif
++
+ #ifdef CONFIG_INET
+ #include <net/tcp.h>
+ #endif
+@@ -1545,6 +1573,7 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
+ 		newsk->sk_userlocks	= sk->sk_userlocks & ~SOCK_BINDPORT_LOCK;
+ 
+ 		sock_reset_flag(newsk, SOCK_DONE);
++		sock_reset_flag(newsk, SOCK_MPTCP);
+ 		skb_queue_head_init(&newsk->sk_error_queue);
+ 
+ 		filter = rcu_dereference_protected(newsk->sk_filter, 1);

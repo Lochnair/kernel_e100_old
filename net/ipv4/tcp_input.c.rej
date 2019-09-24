@@ -1,0 +1,14 @@
+--- net/ipv4/tcp_input.c
++++ net/ipv4/tcp_input.c
+@@ -5173,8 +5264,9 @@ static void tcp_check_space(struct sock *sk)
+ 		sock_reset_flag(sk, SOCK_QUEUE_SHRUNK);
+ 		/* pairs with tcp_poll() */
+ 		smp_mb__after_atomic();
+-		if (sk->sk_socket &&
+-		    test_bit(SOCK_NOSPACE, &sk->sk_socket->flags))
++		if (mptcp(tcp_sk(sk)) ||
++		    (sk->sk_socket &&
++			test_bit(SOCK_NOSPACE, &sk->sk_socket->flags)))
+ 			tcp_new_space(sk);
+ 	}
+ }
